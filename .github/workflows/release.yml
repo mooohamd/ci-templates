@@ -44,6 +44,10 @@ on:
       migrate_command:
         type: string
         default: ""
+      skip_staging:
+        description: "تجاوزٌ صريح لشرط المرور ببيئة الاختبار. فعلٌ مسجَّل — يظهر هنا وفي السجل."
+        type: boolean
+        default: false
       maintenance_confirmed:
         description: "هجرة maintenance لا تعمل تلقائيًّا — تُؤكَّد يدويًّا لكل تشغيلة."
         type: boolean
@@ -122,17 +126,17 @@ jobs:
 
       # دليلُ مرور الاختبار لا افتراضُه: نشرةُ اختبارٍ ناجحة تضع وسم
       # `staging-<sha7>`، وهذا يقرؤه فيُرسم الشريط عن أثرٍ لا عن ظنّ.
-      - name: Was this candidate ever on staging?
+      # لا يُنشر على الإنتاج ما لم يُجرَّب على بيئة الاختبار — يفشل مغلقًا.
+      - name: The candidate must have been on staging
         run: |
           set -euo pipefail
           git fetch origin --tags --quiet || true
-          if git rev-parse -q --verify "refs/tags/staging-$(echo "$SHA" | cut -c1-7)" >/dev/null; then
-            echo "PIPELINE_STAGING_PROVEN=true" >> "$GITHUB_ENV"
-            echo "مرّ ببيئة الاختبار"
-          else
-            echo "PIPELINE_STAGING_PROVEN=false" >> "$GITHUB_ENV"
-            echo "::warning::لا وسم staging لهذا الـSHA — لم يمرّ ببيئة الاختبار"
-          fi
+          found=false
+          git rev-parse -q --verify "refs/tags/staging-$(echo "$SHA" | cut -c1-7)" >/dev/null && found=true
+          node .ci-templates/scripts/staging-gate.mjs \
+            "${{ inputs.environment }}" "${{ inputs.preset }}" "$found" "${{ inputs.skip_staging }}" \
+            | tee /tmp/sg.out
+          grep '^PIPELINE_STAGING_PROVEN=' /tmp/sg.out >> "$GITHUB_ENV"
 
       - name: Stage — candidate
         run: |
