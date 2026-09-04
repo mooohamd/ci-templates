@@ -24,6 +24,13 @@ for (let i = 1; i <= attempts; i++) {
       const j = JSON.parse(text);
       sha = j.sha || j.commit || j.version || null;
     } catch {
+      // ردٌّ غير JSON: غالبًا صفحة حماية النشر (Vercel Deployment Protection)
+      // على رابط النشرة المخصوص — تُجيب 200 وتُعيد HTML.
+      if (/^\s*<(!doctype|html)/i.test(text)) {
+        console.log(`محاولة ${i}/${attempts}: HTTP ${res.status} وردٌّ HTML لا JSON — غالبًا صفحة حماية النشر. افحص الألياس لا رابط النشرة.`);
+        if (i < attempts) await sleep(3000);
+        continue;
+      }
       sha = text.trim();
     }
     if (res.ok && sha && (sha === expected || short(sha) === short(expected))) {

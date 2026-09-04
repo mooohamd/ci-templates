@@ -54,6 +54,10 @@ on:
       smoke_path:
         type: string
         default: "/api/version"
+      smoke_url:
+        description: "العنوان الذي يُفحص: الألياس الذي يراه الناس. فارغٌ = رابط النشرة نفسه — وهو قد يكون محميًّا فيردّ HTML."
+        type: string
+        default: ""
       node_version:
         type: string
         default: "20"
@@ -224,7 +228,14 @@ jobs:
 
       - name: Smoke — the live version must BE the candidate
         id: smoke
-        run: node .ci-templates/scripts/smoke.mjs "${{ steps.deploy.outputs.url }}" "${{ inputs.smoke_path }}" "$SHA"
+        run: |
+          set -euo pipefail
+          # الألياس أولى من رابط النشرة: فحصُه يثبت أن الترقية وقعت، لا أن
+          # البناء نجح — ورابط النشرة قد تحرسه حماية النشر فيردّ HTML بـ200.
+          target="${{ inputs.smoke_url }}"
+          [ -n "$target" ] || target="${{ steps.deploy.outputs.url }}"
+          echo "يُفحص: $target"
+          node .ci-templates/scripts/smoke.mjs "$target" "${{ inputs.smoke_path }}" "$SHA"
 
       # التراجع بزنادٍ لا بمعرفة.
       - name: Rollback (compatible / none)
