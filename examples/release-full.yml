@@ -43,7 +43,7 @@ jobs:
   release:
     needs: [gate]
     # ثبِّت ما يمسّ الأسرار والإنتاج بـSHA كامل، لا بوسمٍ متحرّك.
-    uses: mooohamd/ci-templates/.github/workflows/release.yml@PIN_A_FULL_SHA_HERE
+    uses: mooohamd/ci-templates/.github/workflows/release.yml@08a74d75b6ffe422b23e06cbc80941ac278cbda3
     with:
       candidate_sha: ${{ inputs.candidate_sha }}
       environment: ${{ inputs.environment }}
