@@ -206,10 +206,23 @@ jobs:
           echo "الفحوص المطلوبة كلها انتهت بنجاح: $(ls .gate-ok | tr '\n' ' ')"
 
       # شريط التقدّم يُختم — يُرى أعلى صفحة التشغيلة وفي تطبيق GitHub للجوال.
+      # الفحص المُطفأ يُعلَن متخطّى لا ناجحًا: الشريط لا يجوز أن يقول أخضرَ عن
+      # فحصٍ لم يُطلب — وهي القاعدة الخامسة نفسها مطبَّقةً على الرسم.
+      - name: Compose the skipped list
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          skip=""
+          [ "${{ inputs.run_build }}" = "true" ] || skip="$skip,البناء"
+          [ "${{ inputs.run_types }}" = "true" ] || skip="$skip,الأنواع"
+          [ "${{ inputs.run_unit }}"  = "true" ] || skip="$skip,الوحدة"
+          [ "${{ inputs.run_e2e }}"   = "true" ] || skip="$skip,E2E"
+          echo "SKIPPED=${skip#,}" >> "$GITHUB_ENV"
+
       - name: Progress — done
         if: ${{ success() }}
-        run: node .ci-templates/scripts/stage.mjs "$STAGES" "E2E" done
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "E2E" done "$SKIPPED"
 
       - name: Progress — failed
         if: ${{ failure() }}
-        run: node .ci-templates/scripts/stage.mjs "$STAGES" "${STAGE:-البناء}" failed || true
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "${STAGE:-البناء}" failed "$SKIPPED" || true
