@@ -59,6 +59,10 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    env:
+      STAGES: "البوابة,المرشّح,النشر,الدخان"
+      PIPELINE_SHA: ${{ inputs.ref || github.sha }}
+      PIPELINE_REF: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +103,15 @@ jobs:
           fi
           mkdir -p .gate-ok
 
+      # سكربتات القالب تُجلَب من مستودعها **بنفس الـSHA الذي تعمل به هذه الوظيفة**
+      # (`job_workflow_sha`) — فلا ينفصل السكربت عن نسخة البوابة التي استدعت.
+      - name: Fetch the template's own scripts
+        uses: actions/checkout@v4
+        with:
+          repository: mooohamd/ci-templates
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-templates
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
@@ -106,6 +119,9 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      - name: Progress
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "البوابة" running
 
       - name: Prepare
         if: ${{ inputs.prepare_command != '' }}
@@ -128,16 +144,6 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: pw-report.json
         run: ${{ inputs.e2e_command }}
-
-      # سكربتات القالب تُجلَب من مستودعها **بنفس الـSHA الذي تعمل به هذه الوظيفة**
-      # (`job_workflow_sha`) — فلا ينفصل السكربت عن نسخة البوابة التي استدعت.
-      - name: Fetch the template's own scripts
-        if: ${{ inputs.run_e2e }}
-        uses: actions/checkout@v4
-        with:
-          repository: mooohamd/ci-templates
-          ref: ${{ github.job_workflow_sha }}
-          path: .ci-templates
 
       # القاعدة 5، الشقّ الثاني — Playwright يعدّ التخطّي نتيجةً متوقَّعة، فيُفحص التقرير.
       - name: E2E must have run something, and skipped nothing
@@ -171,3 +177,12 @@ jobs:
           check "${{ inputs.run_e2e }}"   e2e
           [ "$fail" = "0" ] || exit 1
           echo "الفحوص المطلوبة كلها انتهت بنجاح: $(ls .gate-ok | tr '\n' ' ')"
+
+      # شريط التقدّم يُختم — يُرى أعلى صفحة التشغيلة وفي تطبيق GitHub للجوال.
+      - name: Progress — done
+        if: ${{ success() }}
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "البوابة" done
+
+      - name: Progress — failed
+        if: ${{ failure() }}
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "البوابة" failed || true

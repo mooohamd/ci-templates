@@ -77,6 +77,12 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       SHA: ${{ inputs.candidate_sha }}
+      # شريط التقدّم: البوابة تمّت في وظيفةٍ سابقة، فتبدأ هذه من «المرشّح».
+      STAGES: "البوابة,المرشّح,الهجرة,النشر,الدخان,الوسم"
+      SKIPPED: ${{ inputs.migration_strategy == 'none' && 'الهجرة' || '' }}
+      PIPELINE_ENV: ${{ inputs.environment }}
+      PIPELINE_SHA: ${{ inputs.candidate_sha }}
+      PIPELINE_REF: ${{ github.ref_name }}
     steps:
       - name: Contract — the inputs must be sane before anything moves
         run: |
@@ -95,6 +101,19 @@ jobs:
 
       - name: Purge tracked env files (rule 1)
         run: rm -f .env .env.local .env.production .env.production.local || true
+
+      # مبكرًا: شريط التقدّم يُرسم من أول حدّ مرحلة، لا قبل الدخان وحده.
+      - name: Fetch the template's own scripts
+        uses: actions/checkout@v4
+        with:
+          repository: mooohamd/ci-templates
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-templates
+
+      - name: Stage — candidate
+        run: |
+          echo "STAGE=المرشّح" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "المرشّح" running "$SKIPPED"
 
       - name: Identity — the deploy target must be the pinned project
         run: |
@@ -133,9 +152,19 @@ jobs:
           echo "url=$prev" >> "$GITHUB_OUTPUT"
           echo "النشرة السابقة: ${prev:-غير معروفة}"
 
+      - name: Stage — migration
+        run: |
+          echo "STAGE=الهجرة" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الهجرة" running "$SKIPPED"
+
       - name: Migrate
         if: ${{ inputs.migration_strategy != 'none' && inputs.migrate_command != '' }}
         run: ${{ inputs.migrate_command }}
+
+      - name: Stage — deploy
+        run: |
+          echo "STAGE=النشر" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "النشر" running "$SKIPPED"
 
       - name: Pull Vercel environment
         run: vercel pull --yes --environment=production --token "${{ secrets.VERCEL_TOKEN }}"
@@ -168,12 +197,10 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "نُشر: $url"
 
-      - name: Fetch the template's own scripts
-        uses: actions/checkout@v4
-        with:
-          repository: mooohamd/ci-templates
-          ref: ${{ github.job_workflow_sha }}
-          path: .ci-templates
+      - name: Stage — smoke
+        run: |
+          echo "STAGE=الدخان" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الدخان" running "$SKIPPED"
 
       - name: Smoke — the live version must BE the candidate
         id: smoke
@@ -195,6 +222,12 @@ jobs:
           echo "::error::التطبيق قد يكون مكسورًا حيًّا. الإجراء: (1) أبقِ وضع الصيانة، (2) استرجع النسخة الاحتياطية، (3) أرجِع النشرة يدويًّا: vercel rollback"
           exit 1
 
+      - name: Stage — tag
+        if: ${{ success() }}
+        run: |
+          echo "STAGE=الوسم" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الوسم" running "$SKIPPED"
+
       - name: Tag the release
         if: ${{ success() && inputs.environment == 'production' && inputs.tag_on_success }}
         run: |
@@ -203,3 +236,12 @@ jobs:
           git tag -a "$tag" -m "deployed ${{ steps.deploy.outputs.url }} (previous: ${{ steps.prev.outputs.url }})" "$SHA"
           git push origin "$tag"
           echo "الوسم: $tag"
+
+      - name: Stage — done
+        if: ${{ success() }}
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "الوسم" done "$SKIPPED"
+
+      # الشريط يقول أين توقّف بالضبط، لا «فشلت التشغيلة» فحسب.
+      - name: Stage — failed
+        if: ${{ failure() }}
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "${STAGE:-المرشّح}" failed "$SKIPPED" || true
