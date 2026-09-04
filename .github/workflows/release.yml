@@ -21,6 +21,10 @@ on:
         description: "staging أو production"
         type: string
         required: true
+      preset:
+        description: "simple | standard | full — يقرّر الرحلة المرسومة في الملخّص"
+        type: string
+        default: "full"
       gate_passed:
         description: "مرِّر ${{ needs.gate.result == 'success' }} — النشر يرفض غيرها."
         type: boolean
@@ -81,6 +85,7 @@ jobs:
       STAGES: "البوابة,المرشّح,الهجرة,النشر,الدخان,الوسم"
       SKIPPED: ${{ inputs.migration_strategy == 'none' && 'الهجرة' || '' }}
       PIPELINE_ENV: ${{ inputs.environment }}
+      PIPELINE_PRESET: ${{ inputs.preset }}
       PIPELINE_SHA: ${{ inputs.candidate_sha }}
       PIPELINE_REF: ${{ github.ref_name }}
     steps:
@@ -109,6 +114,20 @@ jobs:
           repository: mooohamd/ci-templates
           ref: ${{ github.job_workflow_sha }}
           path: .ci-templates
+
+      # دليلُ مرور الاختبار لا افتراضُه: نشرةُ اختبارٍ ناجحة تضع وسم
+      # `staging-<sha7>`، وهذا يقرؤه فيُرسم الشريط عن أثرٍ لا عن ظنّ.
+      - name: Was this candidate ever on staging?
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --quiet || true
+          if git rev-parse -q --verify "refs/tags/staging-$(echo "$SHA" | cut -c1-7)" >/dev/null; then
+            echo "PIPELINE_STAGING_PROVEN=true" >> "$GITHUB_ENV"
+            echo "مرّ ببيئة الاختبار"
+          else
+            echo "PIPELINE_STAGING_PROVEN=false" >> "$GITHUB_ENV"
+            echo "::warning::لا وسم staging لهذا الـSHA — لم يمرّ ببيئة الاختبار"
+          fi
 
       - name: Stage — candidate
         run: |
@@ -227,6 +246,15 @@ jobs:
         run: |
           echo "STAGE=الوسم" >> "$GITHUB_ENV"
           node .ci-templates/scripts/stage.mjs "$STAGES" "الوسم" running "$SKIPPED"
+
+      # أثرُ المرور: يقرؤه نشرُ الإنتاج لاحقًا فيرسم الرحلة عن دليل.
+      - name: Mark this candidate as staged
+        if: ${{ success() && inputs.environment == 'staging' }}
+        run: |
+          set -euo pipefail
+          tag="staging-$(echo "$SHA" | cut -c1-7)"
+          git tag -f "$tag" "$SHA" && git push -f origin "$tag"
+          echo "الوسم: $tag"
 
       - name: Tag the release
         if: ${{ success() && inputs.environment == 'production' && inputs.tag_on_success }}

@@ -47,6 +47,10 @@ on:
         description: "أمرٌ يسبق الفحوص (توليد عميل ORM مثلًا). فارغٌ = لا شيء."
         type: string
         default: ""
+      preset:
+        description: "simple | standard | full — يقرّر الرحلة المرسومة في الملخّص"
+        type: string
+        default: "standard"
       max_skipped_tests:
         description: "سقف التخطّي في E2E. الصفر هو العقد؛ ارفعه فقط بمبرَّرٍ مكتوب."
         type: number
@@ -60,7 +64,9 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     env:
-      STAGES: "البوابة,المرشّح,النشر,الدخان"
+      STAGES: "البناء,الأنواع,الوحدة,E2E"
+      PIPELINE_PRESET: ${{ inputs.preset }}
+      PIPELINE_ENV: staging
       PIPELINE_SHA: ${{ inputs.ref || github.sha }}
       PIPELINE_REF: ${{ github.ref_name }}
     steps:
@@ -120,24 +126,45 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Progress
-        run: node .ci-templates/scripts/stage.mjs "$STAGES" "البوابة" running
-
       - name: Prepare
         if: ${{ inputs.prepare_command != '' }}
         run: ${{ inputs.prepare_command }}
+
+      - name: Stage — build
+        if: ${{ inputs.run_build }}
+        run: |
+          echo "STAGE=البناء" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "البناء" running
 
       - name: Build
         if: ${{ inputs.run_build }}
         run: ${{ inputs.build_command }} && touch .gate-ok/build
 
+      - name: Stage — types
+        if: ${{ inputs.run_types }}
+        run: |
+          echo "STAGE=الأنواع" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الأنواع" running
+
       - name: Types
         if: ${{ inputs.run_types }}
         run: ${{ inputs.types_command }} && touch .gate-ok/types
 
+      - name: Stage — unit
+        if: ${{ inputs.run_unit }}
+        run: |
+          echo "STAGE=الوحدة" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الوحدة" running
+
       - name: Unit
         if: ${{ inputs.run_unit }}
         run: ${{ inputs.unit_command }} && touch .gate-ok/unit
+
+      - name: Stage — e2e
+        if: ${{ inputs.run_e2e }}
+        run: |
+          echo "STAGE=E2E" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "E2E" running
 
       - name: E2E
         if: ${{ inputs.run_e2e }}
@@ -181,8 +208,8 @@ jobs:
       # شريط التقدّم يُختم — يُرى أعلى صفحة التشغيلة وفي تطبيق GitHub للجوال.
       - name: Progress — done
         if: ${{ success() }}
-        run: node .ci-templates/scripts/stage.mjs "$STAGES" "البوابة" done
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "E2E" done
 
       - name: Progress — failed
         if: ${{ failure() }}
-        run: node .ci-templates/scripts/stage.mjs "$STAGES" "البوابة" failed || true
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "${STAGE:-البناء}" failed || true
