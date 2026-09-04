@@ -160,6 +160,29 @@ jobs:
         if: ${{ inputs.run_unit }}
         run: ${{ inputs.unit_command }} && touch .gate-ok/unit
 
+      # المتصفّح لا يأتي مع npm ci — وغيابُه يُسقط الحزمة كلها عند أول إقلاع.
+      # يُخزَّن بمفتاح نسخة Playwright نفسها: ترقيةُ الحزمة تُبطل الخزن تلقائيًّا.
+      - name: Resolve Playwright version
+        if: ${{ inputs.run_e2e }}
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        if: ${{ inputs.run_e2e }}
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright (browser + system deps)
+        if: ${{ inputs.run_e2e && steps.pw-cache.outputs.cache-hit != 'true' }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright system deps only (browser cached)
+        if: ${{ inputs.run_e2e && steps.pw-cache.outputs.cache-hit == 'true' }}
+        run: npx playwright install-deps chromium
+
       - name: Stage — e2e
         if: ${{ inputs.run_e2e }}
         run: |
