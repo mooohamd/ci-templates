@@ -26,7 +26,8 @@ on:
         type: string
         default: "full"
       gate_passed:
-        description: "مرِّر ${{ needs.gate.result == 'success' }} — النشر يرفض غيرها."
+        # لا تكتب تعبير ${{ }} في نصّ الوصف — GitHub يقيّمه هنا أيضًا فيفشل التحليل.
+        description: "من المستدعي: نتيجة وظيفة البوابة تساوي success. النشر يرفض غيرها."
         type: boolean
         required: true
       expected_project_id:
