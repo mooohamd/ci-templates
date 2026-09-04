@@ -273,7 +273,11 @@ jobs:
         run: |
           set -euo pipefail
           tag="release-$(date -u +%Y%m%d-%H%M)-$(echo "$SHA" | cut -c1-7)"
-          git tag -a "$tag" -m "deployed ${{ steps.deploy.outputs.url }} (previous: ${{ steps.prev.outputs.url }})" "$SHA"
+          # الوسم المشروح يحتاج هوية مُلتزِم، والعدّاء بلا هوية — ووسمُ الاختبار
+          # نجا لأنه خفيف (`tag -f`) لا مشروح. تُمرَّر هنا لا تُضبط عالميًّا.
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a "$tag" -m "deployed ${{ steps.deploy.outputs.url }} (previous: ${{ steps.prev.outputs.url }})" "$SHA"
           git push origin "$tag"
           echo "الوسم: $tag"
 
