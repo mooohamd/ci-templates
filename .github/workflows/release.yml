@@ -1,0 +1,205 @@
+# الإصدار — المرشّح ← البيئة ← النشر ← التحقّق ← التراجع.
+#
+# يُستدعى من وظيفةٍ في المشروع تُشغَّل **من main** بمُدخَل candidate_sha، وبعد
+# وظيفة البوابة في التشغيل نفسه (needs). ينفّذ ما لا تنفّذه الوثيقة:
+#   • لا ينشر إلا SHA اجتاز البوابة **في هذا التشغيل** (gate_passed).
+#   • للإنتاج: يتحقّق أن المرشّح هو رأس main **مرّتين** — عند البدء، ثم مباشرةً
+#     قبل النشر، فتضيق نافذة السباق إلى ثوانٍ.
+#   • هوية مشروع النشر تُطابَق بمعرّفٍ مثبَّت في ملف المستدعي، لا بسرٍّ يقارن نفسه.
+#   • فحص الدخان يطالب الحيّ بأن يعيد الـSHA — «يجيب» لا تكفي.
+#   • الفشل يُرجع النشرة السابقة تلقائيًّا، إلا في هجرة maintenance فيتوقّف بنداء.
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: "الـSHA المرشّح. كل ما بعده يشير إليه."
+        type: string
+        required: true
+      environment:
+        description: "staging أو production"
+        type: string
+        required: true
+      gate_passed:
+        description: "مرِّر ${{ needs.gate.result == 'success' }} — النشر يرفض غيرها."
+        type: boolean
+        required: true
+      expected_project_id:
+        description: "معرّف مشروع Vercel المتوقَّع، مثبَّتٌ نصًّا في ملف المستدعي."
+        type: string
+        required: true
+      require_head_of_main:
+        type: boolean
+        default: true
+      migration_strategy:
+        description: "none | compatible | maintenance"
+        type: string
+        default: "none"
+      migrate_command:
+        type: string
+        default: ""
+      maintenance_confirmed:
+        description: "هجرة maintenance لا تعمل تلقائيًّا — تُؤكَّد يدويًّا لكل تشغيلة."
+        type: boolean
+        default: false
+      prepare_command:
+        type: string
+        default: ""
+      smoke_path:
+        type: string
+        default: "/api/version"
+      node_version:
+        type: string
+        default: "20"
+      extra_build_env:
+        description: "أسطر KEY=VALUE تُحقن في بيئة البناء (علم بيئةٍ مثلًا)."
+        type: string
+        default: ""
+      tag_on_success:
+        type: boolean
+        default: true
+    secrets:
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
+      VERCEL_PROJECT_ID:
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ inputs.environment }}-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - name: Contract — the inputs must be sane before anything moves
+        run: |
+          set -euo pipefail
+          [ "${{ inputs.gate_passed }}" = "true" ] || { echo "::error::المرشّح لم يجتز البوابة في هذا التشغيل"; exit 1; }
+          case "${{ inputs.environment }}" in staging|production) ;; *) echo "::error::environment غير معروف"; exit 1;; esac
+          case "${{ inputs.migration_strategy }}" in none|compatible|maintenance) ;; *) echo "::error::migration_strategy غير معروف"; exit 1;; esac
+          if [ "${{ inputs.migration_strategy }}" = "maintenance" ] && [ "${{ inputs.maintenance_confirmed }}" != "true" ]; then
+            echo "::error::هجرة maintenance لا تعمل تلقائيًّا — أعد التشغيل بـmaintenance_confirmed=true بعد نسخةٍ احتياطية"; exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Purge tracked env files (rule 1)
+        run: rm -f .env .env.local .env.production .env.production.local || true
+
+      - name: Identity — the deploy target must be the pinned project
+        run: |
+          set -euo pipefail
+          if [ "$VERCEL_PROJECT_ID" != "${{ inputs.expected_project_id }}" ]; then
+            echo "::error::سرّ VERCEL_PROJECT_ID لا يطابق المعرّف المثبَّت لهذه البيئة"; exit 1
+          fi
+          echo "project id OK"
+
+      - name: The candidate must be the head of main (first check)
+        if: ${{ inputs.environment == 'production' && inputs.require_head_of_main }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          head=$(git rev-parse origin/main)
+          [ "$head" = "$SHA" ] || { echo "::error::المرشّح $SHA ليس رأس main ($head) — ادمج بالتقديم السريع وأعد الإصدار"; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - run: npm ci
+      - name: Prepare
+        if: ${{ inputs.prepare_command != '' }}
+        run: ${{ inputs.prepare_command }}
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Record the deployment we would fall back to
+        id: prev
+        run: |
+          set -euo pipefail
+          prev=$(vercel ls --prod --token "${{ secrets.VERCEL_TOKEN }}" 2>/dev/null | grep -Eo 'https://[^ ]+' | head -1 || true)
+          echo "url=$prev" >> "$GITHUB_OUTPUT"
+          echo "النشرة السابقة: ${prev:-غير معروفة}"
+
+      - name: Migrate
+        if: ${{ inputs.migration_strategy != 'none' && inputs.migrate_command != '' }}
+        run: ${{ inputs.migrate_command }}
+
+      - name: Pull Vercel environment
+        run: vercel pull --yes --environment=production --token "${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.extra_build_env }}" ]; then
+            printf '%s\n' "${{ inputs.extra_build_env }}" >> "$GITHUB_ENV"
+          fi
+          echo "BUILD_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "NEXT_PUBLIC_BUILD_SHA=$SHA" >> "$GITHUB_ENV"
+      - name: Build (prebuilt)
+        run: vercel build --prod --token "${{ secrets.VERCEL_TOKEN }}"
+
+      # ثانيةً، ملتصقةً بالنشر — بين الفحص الأول والآن مرّ بناءٌ كامل.
+      - name: The candidate must STILL be the head of main (final check)
+        if: ${{ inputs.environment == 'production' && inputs.require_head_of_main }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          head=$(git rev-parse origin/main)
+          [ "$head" = "$SHA" ] || { echo "::error::تحرّك رأس main أثناء البناء — أُلغي الإصدار قبل الترقية"; exit 1; }
+
+      - name: Deploy
+        id: deploy
+        run: |
+          set -euo pipefail
+          url=$(vercel deploy --prebuilt --prod --token "${{ secrets.VERCEL_TOKEN }}")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "نُشر: $url"
+
+      - name: Fetch the template's own scripts
+        uses: actions/checkout@v4
+        with:
+          repository: mooohamd/ci-templates
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-templates
+
+      - name: Smoke — the live version must BE the candidate
+        id: smoke
+        run: node .ci-templates/scripts/smoke.mjs "${{ steps.deploy.outputs.url }}" "${{ inputs.smoke_path }}" "$SHA"
+
+      # التراجع بزنادٍ لا بمعرفة.
+      - name: Rollback (compatible / none)
+        if: ${{ failure() && steps.smoke.outcome == 'failure' && inputs.migration_strategy != 'maintenance' }}
+        run: |
+          set -euo pipefail
+          echo "::warning::فشل فحص الدخان — إرجاع النشرة السابقة"
+          vercel rollback --yes --token "${{ secrets.VERCEL_TOKEN }}"
+          echo "أُرجعت. النشرة الفاشلة: ${{ steps.deploy.outputs.url }}"
+
+      - name: Halt (maintenance) — a schema change is not auto-reversible
+        if: ${{ failure() && steps.smoke.outcome == 'failure' && inputs.migration_strategy == 'maintenance' }}
+        run: |
+          echo "::error::فشل الدخان بعد هجرة maintenance — **لا تراجع تلقائي**."
+          echo "::error::التطبيق قد يكون مكسورًا حيًّا. الإجراء: (1) أبقِ وضع الصيانة، (2) استرجع النسخة الاحتياطية، (3) أرجِع النشرة يدويًّا: vercel rollback"
+          exit 1
+
+      - name: Tag the release
+        if: ${{ success() && inputs.environment == 'production' && inputs.tag_on_success }}
+        run: |
+          set -euo pipefail
+          tag="release-$(date -u +%Y%m%d-%H%M)-$(echo "$SHA" | cut -c1-7)"
+          git tag -a "$tag" -m "deployed ${{ steps.deploy.outputs.url }} (previous: ${{ steps.prev.outputs.url }})" "$SHA"
+          git push origin "$tag"
+          echo "الوسم: $tag"

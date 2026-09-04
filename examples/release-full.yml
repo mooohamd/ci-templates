@@ -1,0 +1,59 @@
+# .github/workflows/release.yml — القالب full.
+#
+# يُشغَّل **يدويًّا من main** بمُدخَل candidate_sha. تشغيلُه من main هو ما يمنع
+# فرعًا من تعديل بوابةِ نفسه: ملفُّ الوظيفة يُقرأ من المرجع المُشغَّل منه.
+#
+# الترتيب المقصود:
+#   1. شغّله بـenvironment=staging على SHA فرعك ← جرّبه أنت والمجرّبون.
+#   2. لا ملاحظات ⇒ ادمج الفرع في main **بالتقديم السريع** (--ff-only).
+#   3. شغّله بـenvironment=production على الـSHA نفسه — سيرفض إن لم يكن رأس main.
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "الـSHA المرشّح"
+        required: true
+      environment:
+        type: choice
+        options: [staging, production]
+        default: staging
+      migration_strategy:
+        type: choice
+        options: [none, compatible, maintenance]
+        default: none
+      maintenance_confirmed:
+        description: "لهجرة maintenance وحدها، بعد نسخةٍ احتياطية"
+        type: boolean
+        default: false
+
+jobs:
+  gate:
+    uses: mooohamd/ci-templates/.github/workflows/gate.yml@v1
+    with:
+      ref: ${{ inputs.candidate_sha }}
+      run_build: true
+      run_types: true
+      run_unit: true
+      run_e2e: true
+      prepare_command: npx prisma generate
+    secrets:
+      TEST_ENV: ${{ secrets.TEST_ENV }}
+
+  release:
+    needs: [gate]
+    # ثبِّت ما يمسّ الأسرار والإنتاج بـSHA كامل، لا بوسمٍ متحرّك.
+    uses: mooohamd/ci-templates/.github/workflows/release.yml@PIN_A_FULL_SHA_HERE
+    with:
+      candidate_sha: ${{ inputs.candidate_sha }}
+      environment: ${{ inputs.environment }}
+      gate_passed: ${{ needs.gate.result == 'success' }}
+      expected_project_id: prj_REPLACE_ME
+      migration_strategy: ${{ inputs.migration_strategy }}
+      maintenance_confirmed: ${{ inputs.maintenance_confirmed }}
+      prepare_command: npx prisma generate
+      smoke_path: /api/version
+    secrets:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ inputs.environment == 'production' && secrets.VERCEL_PROJECT_ID || secrets.VERCEL_PROJECT_ID_TEST }}

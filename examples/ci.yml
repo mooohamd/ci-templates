@@ -1,0 +1,18 @@
+# .github/workflows/ci.yml — البوابة على كل دفعة في أي فرع.
+# القالب يظهر في الفحوص المُفعَّلة، لا في ملفِّ تهيئةٍ منفصل.
+name: CI
+on: [push]
+
+jobs:
+  gate:
+    # simple:   run_build فقط
+    # standard: + run_types + run_unit
+    # full:     نفس standard هنا، وE2E تُضاف عند المرشّح لا على كل دفعة
+    uses: mooohamd/ci-templates/.github/workflows/gate.yml@v1
+    with:
+      run_build: true
+      run_types: true
+      run_unit: true
+      prepare_command: npx prisma generate
+    secrets:
+      TEST_ENV: ${{ secrets.TEST_ENV }}

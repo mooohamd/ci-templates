@@ -1,0 +1,173 @@
+# البوابة — تُستدعى من كل مشروع. لا تعرف شيئًا عن مشروعٍ بعينه.
+#
+# تفرض قاعدتين من قواعد سياسة الإصدار بنفسها، لا بالنيّة:
+#   القاعدة 1 — لا تلمس بيانات الإنتاج ولا أسراره: تُمحى ملفات .env المتتبَّعة
+#     **قبل أول أمرٍ يملكه المشروع** (npm ci يشغّل سكربتات دورة حياة)، ولا يصل
+#     إلى المشروع إلا سرٌّ واحد صريح هو TEST_ENV. لا `secrets: inherit`.
+#   القاعدة 5 — لا فحصَ متخطّى: كل فحصٍ مُفعَّل يكتب علامته، وخطوةٌ ختامية تفشل
+#     إن نقصت علامةُ فحصٍ طُلب. ويشمل ذلك تخطّي Playwright من داخله.
+name: Gate
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "الـSHA المراد فحصه. فارغٌ = مرجع المستدعي."
+        type: string
+        required: false
+        default: ""
+      node_version:
+        type: string
+        default: "20"
+      run_build:
+        type: boolean
+        default: true
+      run_types:
+        type: boolean
+        default: false
+      run_unit:
+        type: boolean
+        default: false
+      run_e2e:
+        type: boolean
+        default: false
+      build_command:
+        type: string
+        default: "npm run build"
+      types_command:
+        type: string
+        default: "npm run typecheck"
+      unit_command:
+        type: string
+        default: "npm test"
+      e2e_command:
+        type: string
+        default: "npx playwright test --reporter=list,json"
+      prepare_command:
+        description: "أمرٌ يسبق الفحوص (توليد عميل ORM مثلًا). فارغٌ = لا شيء."
+        type: string
+        default: ""
+      max_skipped_tests:
+        description: "سقف التخطّي في E2E. الصفر هو العقد؛ ارفعه فقط بمبرَّرٍ مكتوب."
+        type: number
+        default: 0
+    secrets:
+      TEST_ENV:
+        description: "محتوى dotenv لبيئة الفحص. لا يُمرَّر إلا هو — ولا سرَّ إنتاجٍ أبدًا."
+        required: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # القاعدة 1 — قبل npm ci، لأن التثبيت يشغّل سكربتات المشروع.
+      - name: Purge tracked env files (rule 1)
+        run: |
+          set -euo pipefail
+          removed=0
+          for f in .env .env.local .env.production .env.production.local; do
+            if [ -f "$f" ]; then rm -f "$f"; echo "removed $f"; removed=1; fi
+          done
+          [ "$removed" = "0" ] && echo "no tracked env file present" || true
+
+      # الأسرار تُمرَّر بيئةً لا داخل تعبير — تعبيرُ `if` لا يقرأ الأسرار بثبات.
+      - name: Write the test environment (the only secret that reaches the project)
+        env:
+          TEST_ENV: ${{ secrets.TEST_ENV }}
+        run: |
+          set -euo pipefail
+          if [ -n "$TEST_ENV" ]; then
+            printf '%s\n' "$TEST_ENV" > .env
+            echo "wrote .env from TEST_ENV ($(wc -l < .env) lines)"
+          else
+            echo "no TEST_ENV supplied"
+          fi
+
+      # القاعدة 5، الشقّ الأول — فحصٌ طُلب وأسرارُه غائبة يفشل، لا يُتخطّى صامتًا.
+      - name: Preflight — a requested check may not silently lack its inputs
+        env:
+          TEST_ENV: ${{ secrets.TEST_ENV }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.run_e2e }}" = "true" ] && [ -z "$TEST_ENV" ]; then
+            echo "::error::run_e2e=true بلا سرّ TEST_ENV — البوابة تفشل بدل أن تمرّ خضراء وهي لا تختبر شيئًا"
+            exit 1
+          fi
+          mkdir -p .gate-ok
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Prepare
+        if: ${{ inputs.prepare_command != '' }}
+        run: ${{ inputs.prepare_command }}
+
+      - name: Build
+        if: ${{ inputs.run_build }}
+        run: ${{ inputs.build_command }} && touch .gate-ok/build
+
+      - name: Types
+        if: ${{ inputs.run_types }}
+        run: ${{ inputs.types_command }} && touch .gate-ok/types
+
+      - name: Unit
+        if: ${{ inputs.run_unit }}
+        run: ${{ inputs.unit_command }} && touch .gate-ok/unit
+
+      - name: E2E
+        if: ${{ inputs.run_e2e }}
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: pw-report.json
+        run: ${{ inputs.e2e_command }}
+
+      # سكربتات القالب تُجلَب من مستودعها **بنفس الـSHA الذي تعمل به هذه الوظيفة**
+      # (`job_workflow_sha`) — فلا ينفصل السكربت عن نسخة البوابة التي استدعت.
+      - name: Fetch the template's own scripts
+        if: ${{ inputs.run_e2e }}
+        uses: actions/checkout@v4
+        with:
+          repository: mooohamd/ci-templates
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-templates
+
+      # القاعدة 5، الشقّ الثاني — Playwright يعدّ التخطّي نتيجةً متوقَّعة، فيُفحص التقرير.
+      - name: E2E must have run something, and skipped nothing
+        if: ${{ inputs.run_e2e }}
+        run: |
+          node .ci-templates/scripts/assert-no-skips.mjs pw-report.json ${{ inputs.max_skipped_tests }}
+          touch .gate-ok/e2e
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ failure() && inputs.run_e2e }}
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            pw-report.json
+          retention-days: 7
+
+      # القاعدة 5، الشقّ الثالث — «طُلب فحصٌ ولم يُسجَّل نجاحه» يفشل مغلقًا.
+      - name: Every requested check recorded a success
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            if [ "$1" = "true" ] && [ ! -f ".gate-ok/$2" ]; then
+              echo "::error::الفحص '$2' طُلب ولم تُسجَّل له علامة نجاح"; fail=1
+            fi
+          }
+          check "${{ inputs.run_build }}" build
+          check "${{ inputs.run_types }}" types
+          check "${{ inputs.run_unit }}"  unit
+          check "${{ inputs.run_e2e }}"   e2e
+          [ "$fail" = "0" ] || exit 1
+          echo "الفحوص المطلوبة كلها انتهت بنجاح: $(ls .gate-ok | tr '\n' ' ')"
