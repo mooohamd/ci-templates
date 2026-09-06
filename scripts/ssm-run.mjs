@@ -2,11 +2,12 @@
 // الناشر عبر SSM: يرسل سكربتًا إلى جهازٍ مثبَّت (AWS-RunShellScript) وينتظر نتيجته وينقل رمز
 // خروجه **كما هو** — فمخارج متحكم التفعيل (3–10) تصل تشغيلة الإصدار بلا تسطيح.
 //   node ssm-run.mjs <region> <instanceId> <executionTimeoutSec> <scriptPath> [KEY=VALUE ...]
-// المتغيرات تُصدَّر مقتبسةً بأمان قبل أسطر السكربت. الخرج المضمَّن في get-command-invocation
-// مبتور (~24 ألف حرف) فيُطبع ما وصل ويُشار إلى الحاجة لـCloudWatch لو احتيج الكامل.
+// المتغيرات تُصدَّر مقتبسةً بأمان قبل أسطر السكربت. مخارج هذا المنفذ نفسه: 124 مهلة · 125 إلغاء ·
+// 126 تعذّر قراءة النتيجة (صلاحية/اعتماد) — فلا يُخلط بمخارج المتحكم. الخرج المضمَّن مبتور (~24 ألف
+// حرف) فيُطبع ما وصل.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
+import { setTimeout as nodeSleep } from "node:timers/promises";
 
 const quote = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
@@ -43,11 +44,61 @@ export function outcomeOf(inv) {
   }
 }
 
-function aws(args) {
-  return execFileSync("aws", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+// الاستدعاء لا يظهر فورًا بعد الإرسال (InvocationDoesNotExist) فيُعاد؛ وما سواه (صلاحية · اعتماد ·
+// شبكة) يُعلَن ويفشل فورًا لا بعد المهلة كلها
+export function classifyInvocationError(stderr) {
+  return /InvocationDoesNotExist/.test(String(stderr ?? "")) ? "retry" : "fatal";
 }
 
-async function main() {
+function realAws(args) {
+  try {
+    return execFileSync("aws", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (e) {
+    const err = new Error(String(e.stderr || e.message));
+    err.stderr = String(e.stderr || e.message);
+    throw err;
+  }
+}
+
+export async function runCommand({ region, instanceId, timeoutSec, scriptText, env }, deps = {}) {
+  const aws = deps.aws ?? realAws;
+  const sleep = deps.sleep ?? ((ms) => nodeSleep(ms));
+  const log = deps.log ?? console.log;
+  const err = deps.err ?? console.error;
+  const now = deps.now ?? Date.now;
+  const commands = buildCommands(scriptText, env);
+  const params = JSON.stringify({ commands, executionTimeout: [String(Number(timeoutSec))] });
+  const sent = JSON.parse(aws([
+    "ssm", "send-command", "--region", region, "--instance-ids", instanceId,
+    "--document-name", "AWS-RunShellScript", "--comment", `release ${env?.NOOQ_BUNDLE_ID ?? ""}`.slice(0, 100),
+    "--timeout-seconds", "120", "--parameters", params, "--output", "json",
+  ]));
+  const commandId = sent.Command.CommandId;
+  log(`SSM command ${commandId} → ${instanceId}`);
+  const deadline = now() + (Number(timeoutSec) + 180) * 1000;
+  while (now() < deadline) {
+    await sleep(5000);
+    let inv;
+    try {
+      inv = JSON.parse(aws(["ssm", "get-command-invocation", "--region", region, "--command-id", commandId, "--instance-id", instanceId, "--output", "json"]));
+    } catch (e) {
+      if (classifyInvocationError(e.stderr ?? e.message) === "retry") continue;
+      err(`::error::تعذّرت قراءة نتيجة الأمر ${commandId}: ${String(e.stderr ?? e.message).trim()}`);
+      return { exitCode: 126, commandId };
+    }
+    const o = outcomeOf(inv);
+    if (o.done) {
+      if (inv.StandardOutputContent) log(inv.StandardOutputContent);
+      if (inv.StandardErrorContent) err(inv.StandardErrorContent);
+      log(`SSM status: ${inv.Status} · exit ${o.exitCode}`);
+      return { exitCode: o.exitCode, commandId };
+    }
+  }
+  err(`::error::انتهت مهلة انتظار الأمر ${commandId} على ${instanceId}`);
+  return { exitCode: 124, commandId };
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
   const [, , region, instanceId, timeoutArg, scriptPath, ...kv] = process.argv;
   if (!region || !instanceId || !timeoutArg || !scriptPath) {
     console.error("usage: ssm-run.mjs <region> <instanceId> <executionTimeoutSec> <scriptPath> [KEY=VALUE ...]");
@@ -59,34 +110,6 @@ async function main() {
     if (i <= 0) { console.error(`وسيط غير صالح: ${pair}`); process.exit(2); }
     env[pair.slice(0, i)] = pair.slice(i + 1);
   }
-  const commands = buildCommands(readFileSync(scriptPath, "utf8"), env);
-  const params = JSON.stringify({ commands, executionTimeout: [String(Number(timeoutArg))] });
-  const sent = JSON.parse(aws([
-    "ssm", "send-command", "--region", region, "--instance-ids", instanceId,
-    "--document-name", "AWS-RunShellScript", "--comment", `nooq release ${env.NOOQ_BUNDLE_ID ?? ""}`.slice(0, 100),
-    "--timeout-seconds", "120", "--parameters", params, "--output", "json",
-  ]));
-  const commandId = sent.Command.CommandId;
-  console.log(`SSM command ${commandId} → ${instanceId}`);
-  const deadline = Date.now() + (Number(timeoutArg) + 180) * 1000;
-  let inv = null;
-  while (Date.now() < deadline) {
-    await sleep(5000);
-    try {
-      inv = JSON.parse(aws(["ssm", "get-command-invocation", "--region", region, "--command-id", commandId, "--instance-id", instanceId, "--output", "json"]));
-    } catch {
-      continue; // الاستدعاء لا يظهر فورًا بعد الإرسال
-    }
-    const o = outcomeOf(inv);
-    if (o.done) {
-      if (inv.StandardOutputContent) console.log(inv.StandardOutputContent);
-      if (inv.StandardErrorContent) console.error(inv.StandardErrorContent);
-      console.log(`SSM status: ${inv.Status} · exit ${o.exitCode}`);
-      process.exit(o.exitCode);
-    }
-  }
-  console.error(`::error::انتهت مهلة انتظار الأمر ${commandId} على ${instanceId}`);
-  process.exit(124);
+  const r = await runCommand({ region, instanceId, timeoutSec: Number(timeoutArg), scriptText: readFileSync(scriptPath, "utf8"), env });
+  process.exit(r.exitCode);
 }
-
-if (import.meta.url === `file://${process.argv[1]}`) await main();

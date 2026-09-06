@@ -150,7 +150,11 @@ jobs:
           set -euo pipefail
           git fetch origin --tags --quiet || true
           found=false
-          git rev-parse -q --verify "refs/tags/staging-$(echo "$SHA" | cut -c1-7)" >/dev/null && found=true
+          tag="staging-$(echo "$SHA" | cut -c1-7)"
+          if target=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null); then
+            # الاسم بادئةٌ من 7 محارف وقد يشترك فيها التزامان — ما يثبت المرور هو هدف الوسم لا اسمه
+            if [ "$target" = "$SHA" ]; then found=true; else echo "::warning::الوسم $tag يشير إلى $target لا إلى المرشّح — لا يُعدّ دليلًا"; fi
+          fi
           node .ci-templates/scripts/staging-gate.mjs \
             "${{ inputs.environment }}" "${{ inputs.preset }}" "$found" "${{ inputs.skip_staging }}" \
             | tee /tmp/sg.out
@@ -205,7 +209,8 @@ jobs:
           [ "$ping" = "Online" ] || { echo "::error::وكيل SSM على $IN_INSTANCE ليس Online ($ping) — لا هدف لا يُرى"; exit 1; }
           echo "الهوية $who · الجهاز $IN_INSTANCE Online"
 
-      # السابقة تُقرأ قبل أي مساس — إليها يُرجَع إن فشل الدخان بعد تفعيلٍ «ناجح»
+      # السابقة تُقرأ قبل أي مساس — إليها يُرجَع إن فشل الدخان بعد تفعيلٍ «ناجح». تعذّر القراءة
+      # (صلاحية · وكيل · مهلة) يوقف الإصدار: لا نشر أعمى؛ وغياب الختم أصلًا نشرٌ أول يُعلَن كذلك.
       - name: Record the bundle we would fall back to
         id: prev
         env:
@@ -213,11 +218,18 @@ jobs:
           IN_STAMP: ${{ inputs.deployed_stamp_path }}
         run: |
           set -euo pipefail
-          printf 'cat %q 2>/dev/null | cut -d" " -f1 || true\n' "$IN_STAMP" > /tmp/read-stamp.sh
-          out=$(node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" 60 /tmp/read-stamp.sh || true)
-          prev=$(echo "$out" | grep -Eo '^[0-9a-f]{64}$' | head -1 || true)
-          echo "id=$prev" >> "$GITHUB_OUTPUT"
-          echo "الحزمة الحية السابقة: ${prev:-غير معروفة (خط أساس أو أول نشر)}"
+          printf 'if [ -f %q ]; then head -1 %q; else echo NONE; fi\n' "$IN_STAMP" "$IN_STAMP" > /tmp/read-stamp.sh
+          out=$(node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" 60 /tmp/read-stamp.sh)
+          line=$(echo "$out" | grep -E '^([0-9a-f]{64}( |$)|NONE$)' | head -1 || true)
+          [ -n "$line" ] || { echo "::error::تعذّرت قراءة ختم الجهاز $IN_STAMP — لا نشر بلا معرفة ما سيُرجَع إليه"; echo "$out"; exit 1; }
+          if [ "$line" = "NONE" ]; then
+            echo "::warning::لا ختم على الجهاز — نشرٌ أول: لا حزمة سابقة يُرجَع إليها (فشل الصحة يعوّضه المتحكم بخط أساس)"
+            echo "id=" >> "$GITHUB_OUTPUT"; echo "sha=" >> "$GITHUB_OUTPUT"
+          else
+            prev_id=$(echo "$line" | cut -d' ' -f1); prev_sha=$(echo "$line" | cut -d' ' -f2)
+            echo "id=$prev_id" >> "$GITHUB_OUTPUT"; echo "sha=$prev_sha" >> "$GITHUB_OUTPUT"
+            echo "الحزمة الحية السابقة: $prev_id (الخادم $prev_sha)"
+          fi
 
       - name: Stage — migration
         run: |
@@ -284,33 +296,42 @@ jobs:
           echo "STAGE=الدخان" >> "$GITHUB_ENV"
           node .ci-templates/scripts/stage.mjs "$STAGES" "الدخان" running "$SKIPPED"
 
-      - name: Smoke — the alias must serve the candidate, clean
+      - name: Smoke — one response must carry the full candidate SHA and state=clean
         id: smoke
         env:
           IN_DOMAIN: ${{ inputs.expected_domain }}
           IN_PATH: ${{ inputs.smoke_path }}
-        run: |
-          set -euo pipefail
-          node .ci-templates/scripts/smoke.mjs "https://$IN_DOMAIN" "$IN_PATH" "$SHA" 20
-          state=$(curl -fsS -H 'cache-control: no-cache' "https://$IN_DOMAIN$IN_PATH?_=$(date +%s)" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).state??"")}catch{console.log("")}})')
-          [ "$state" = "clean" ] || { echo "::error::الحيّ يعلن حزمةً ${state:-بلا حالة} لا clean"; exit 1; }
+        run: node .ci-templates/scripts/smoke-bundle.mjs "https://$IN_DOMAIN" "$IN_PATH" "$SHA" 20
 
-      - name: Rollback (compatible / none) — reactivate the previous bundle
+      - name: Rollback (compatible / none) — reactivate the previous bundle and prove it
         if: ${{ failure() && steps.smoke.outcome == 'failure' && inputs.migration_strategy != 'maintenance' }}
         env:
           IN_INSTANCE: ${{ inputs.expected_instance_id }}
           IN_BOOT: ${{ inputs.bootstrap_path }}
           IN_TIMEOUT: ${{ inputs.execution_timeout }}
+          IN_STAMP: ${{ inputs.deployed_stamp_path }}
+          IN_DOMAIN: ${{ inputs.expected_domain }}
+          IN_PATH: ${{ inputs.smoke_path }}
           PREV: ${{ steps.prev.outputs.id }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
         run: |
           set -euo pipefail
-          if [[ "$PREV" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::warning::فشل الدخان — إرجاع الحزمة السابقة $PREV"
-            node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" "$IN_TIMEOUT" "$IN_BOOT" "NOOQ_BUNDLE_ID=$PREV"
-            echo "أُرجعت $PREV. النشرة الفاشلة: ${{ steps.bundle.outputs.BUNDLE_ID }}"
-          else
-            echo "::warning::لا حزمة سابقة معروفة على الجهاز — إن فشلت الصحة فقد عوّض المتحكم ذاتيًّا؛ افحص الختم يدويًّا"
+          if ! [[ "$PREV" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::فشل الدخان ولا حزمة سابقة معروفة على الجهاز (نشرٌ أول) — المرشّح الفاشل حيٌّ إن كانت صحته سليمة؛ افحص الألياس والختم يدويًّا"
+            exit 1
           fi
+          echo "::warning::فشل الدخان — إرجاع الحزمة السابقة $PREV"
+          node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" "$IN_TIMEOUT" "$IN_BOOT" "NOOQ_BUNDLE_ID=$PREV"
+          # «أُرجعت» تُقال عن دليل: الختم على الجهاز ثم الألياس بـSHA السابقة
+          printf 'head -1 %q\n' "$IN_STAMP" > /tmp/read-stamp.sh
+          now=$(node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" 60 /tmp/read-stamp.sh | grep -E '^[0-9a-f]{64} ' | head -1 | cut -d' ' -f1 || true)
+          [ "$now" = "$PREV" ] || { echo "::error::بعد الإرجاع الختم يقول ${now:-لا شيء} لا $PREV"; exit 1; }
+          if [[ "$PREV_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            node .ci-templates/scripts/smoke-bundle.mjs "https://$IN_DOMAIN" "$IN_PATH" "$PREV_SHA" 20
+          else
+            echo "::warning::ختم السابقة يحمل SHA مختصرًا ($PREV_SHA) — أُثبت الإرجاع بالختم لا بالألياس"
+          fi
+          echo "أُرجعت $PREV وأُثبتت. النشرة الفاشلة: ${{ steps.bundle.outputs.BUNDLE_ID }}"
 
       - name: Halt (maintenance) — a schema change is not auto-reversible
         if: ${{ failure() && steps.smoke.outcome == 'failure' && inputs.migration_strategy == 'maintenance' }}

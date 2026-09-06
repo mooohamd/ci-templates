@@ -136,7 +136,11 @@ jobs:
           set -euo pipefail
           git fetch origin --tags --quiet || true
           found=false
-          git rev-parse -q --verify "refs/tags/staging-$(echo "$SHA" | cut -c1-7)" >/dev/null && found=true
+          tag="staging-$(echo "$SHA" | cut -c1-7)"
+          if target=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" 2>/dev/null); then
+            # الاسم بادئةٌ من 7 محارف وقد يشترك فيها التزامان — ما يثبت المرور هو هدف الوسم لا اسمه
+            if [ "$target" = "$SHA" ]; then found=true; else echo "::warning::الوسم $tag يشير إلى $target لا إلى المرشّح — لا يُعدّ دليلًا"; fi
+          fi
           node .ci-templates/scripts/staging-gate.mjs \
             "${{ inputs.environment }}" "${{ inputs.preset }}" "$found" "${{ inputs.skip_staging }}" \
             | tee /tmp/sg.out
