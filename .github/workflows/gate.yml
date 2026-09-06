@@ -19,6 +19,10 @@ on:
       node_version:
         type: string
         default: "20"
+      package_manager:
+        description: "npm | pnpm — مدير الحزم الذي يثبّت ويشغّل الأوامر. pnpm يقرأ نسخته من حقل packageManager في package.json."
+        type: string
+        default: "npm"
       run_build:
         type: boolean
         default: true
@@ -32,17 +36,21 @@ on:
         type: boolean
         default: false
       build_command:
+        description: "فارغٌ = `<pm> run build` بمدير الحزم المختار."
         type: string
-        default: "npm run build"
+        default: ""
       types_command:
+        description: "فارغٌ = `<pm> run typecheck`."
         type: string
-        default: "npm run typecheck"
+        default: ""
       unit_command:
+        description: "فارغٌ = `<pm> test`."
         type: string
-        default: "npm test"
+        default: ""
       e2e_command:
+        description: "فارغٌ = `npx|pnpm exec playwright test --reporter=list,json`."
         type: string
-        default: "npx playwright test --reporter=list,json"
+        default: ""
       prepare_command:
         description: "أمرٌ يسبق الفحوص (توليد عميل ORM مثلًا). فارغٌ = لا شيء."
         type: string
@@ -130,13 +138,46 @@ jobs:
           ref: ${{ github.job_workflow_sha }}
           path: .ci-templates
 
+      # مدير الحزم من المُدخَل: npm افتراضًا، وpnpm يُثبَّت قبل setup-node كي يعمل خزنُه.
+      # الأوامر الافتراضية تُحلّ هنا لا في المُدخَلات — فيبقى npm كما كان لمن لم يغيّر شيئًا.
+      - name: Resolve the package manager and default commands
+        env:
+          # المُدخَلات تمرّ بيئةً لا داخل النص — نصٌّ فيه علامات اقتباس أو $ لا يكسر الصدفة
+          IN_PM: ${{ inputs.package_manager }}
+          IN_BUILD: ${{ inputs.build_command }}
+          IN_TYPES: ${{ inputs.types_command }}
+          IN_UNIT: ${{ inputs.unit_command }}
+          IN_E2E: ${{ inputs.e2e_command }}
+        run: |
+          set -euo pipefail
+          pm="$IN_PM"
+          case "$pm" in npm|pnpm) ;; *) echo "::error::package_manager غير معروف: $pm (npm | pnpm)"; exit 1;; esac
+          exec_cmd="npx"; [ "$pm" = "pnpm" ] && exec_cmd="pnpm exec"
+          build="$IN_BUILD"; [ -n "$build" ] || build="$pm run build"
+          types="$IN_TYPES"; [ -n "$types" ] || types="$pm run typecheck"
+          unit="$IN_UNIT";   [ -n "$unit" ]  || unit="$pm test"
+          e2e="$IN_E2E";     [ -n "$e2e" ]   || e2e="$exec_cmd playwright test --reporter=list,json"
+          # صيغة الأسطر المتعددة في GITHUB_ENV — أمرٌ فيه سطرٌ جديد لا يفسد الملف
+          setvar() { { echo "$1<<__GATE_EOF__"; echo "$2"; echo "__GATE_EOF__"; } >> "$GITHUB_ENV"; }
+          setvar PM "$pm"
+          setvar BUILD_CMD "$build"
+          setvar TYPES_CMD "$types"
+          setvar UNIT_CMD "$unit"
+          setvar E2E_CMD "$e2e"
+          echo "$pm · build: $build · types: $types · unit: $unit · e2e: $e2e"
+
+      - uses: pnpm/action-setup@v4
+        if: ${{ inputs.package_manager == 'pnpm' }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
+          cache: ${{ inputs.package_manager }}
 
       - name: Install
-        run: npm ci
+        run: |
+          set -euo pipefail
+          if [ "$PM" = "pnpm" ]; then pnpm install --frozen-lockfile; else npm ci; fi
 
       - name: Prepare
         if: ${{ inputs.prepare_command != '' }}
@@ -150,7 +191,7 @@ jobs:
 
       - name: Build
         if: ${{ inputs.run_build }}
-        run: ${{ inputs.build_command }} && touch .gate-ok/build
+        run: eval "$BUILD_CMD" && touch .gate-ok/build
 
       - name: Stage — types
         if: ${{ inputs.run_types }}
@@ -160,7 +201,7 @@ jobs:
 
       - name: Types
         if: ${{ inputs.run_types }}
-        run: ${{ inputs.types_command }} && touch .gate-ok/types
+        run: eval "$TYPES_CMD" && touch .gate-ok/types
 
       - name: Stage — unit
         if: ${{ inputs.run_unit }}
@@ -170,7 +211,7 @@ jobs:
 
       - name: Unit
         if: ${{ inputs.run_unit }}
-        run: ${{ inputs.unit_command }} && touch .gate-ok/unit
+        run: eval "$UNIT_CMD" && touch .gate-ok/unit
 
       # المتصفّح لا يأتي مع npm ci — وغيابُه يُسقط الحزمة كلها عند أول إقلاع.
       # يُخزَّن بمفتاح نسخة Playwright نفسها: ترقيةُ الحزمة تُبطل الخزن تلقائيًّا.
@@ -205,7 +246,7 @@ jobs:
         if: ${{ inputs.run_e2e }}
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: pw-report.json
-        run: ${{ inputs.e2e_command }}
+        run: eval "$E2E_CMD"
 
       # القاعدة 5، الشقّ الثاني — Playwright يعدّ التخطّي نتيجةً متوقَّعة، فيُفحص التقرير.
       - name: E2E must have run something, and skipped nothing
