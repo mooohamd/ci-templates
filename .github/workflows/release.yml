@@ -167,7 +167,8 @@ jobs:
         run: |
           case "${{ inputs.package_manager }}" in npm|pnpm) ;; *) echo "::error::package_manager غير معروف (npm | pnpm)"; exit 1;; esac
 
-      - uses: pnpm/action-setup@v4
+      # فعلٌ من طرفٍ ثالث في ناشرٍ يحمل الأسرار — يُثبَّت بـSHA كامل
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         if: ${{ inputs.package_manager == 'pnpm' }}
 
       - uses: actions/setup-node@v4

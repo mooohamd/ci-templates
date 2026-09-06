@@ -166,7 +166,8 @@ jobs:
           setvar E2E_CMD "$e2e"
           echo "$pm · build: $build · types: $types · unit: $unit · e2e: $e2e"
 
-      - uses: pnpm/action-setup@v4
+      # فعلٌ من طرفٍ ثالث يُثبَّت بـSHA كامل لا بوسمٍ متحرّك
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         if: ${{ inputs.package_manager == 'pnpm' }}
 
       - uses: actions/setup-node@v4
@@ -191,7 +192,9 @@ jobs:
 
       - name: Build
         if: ${{ inputs.run_build }}
-        run: eval "$BUILD_CMD" && touch .gate-ok/build
+        run: |
+          : "${BUILD_CMD:?أمر البناء غائب}"
+          eval "$BUILD_CMD" && touch .gate-ok/build
 
       - name: Stage — types
         if: ${{ inputs.run_types }}
@@ -201,7 +204,9 @@ jobs:
 
       - name: Types
         if: ${{ inputs.run_types }}
-        run: eval "$TYPES_CMD" && touch .gate-ok/types
+        run: |
+          : "${TYPES_CMD:?أمر الأنواع غائب}"
+          eval "$TYPES_CMD" && touch .gate-ok/types
 
       - name: Stage — unit
         if: ${{ inputs.run_unit }}
@@ -211,7 +216,9 @@ jobs:
 
       - name: Unit
         if: ${{ inputs.run_unit }}
-        run: eval "$UNIT_CMD" && touch .gate-ok/unit
+        run: |
+          : "${UNIT_CMD:?أمر الوحدة غائب}"
+          eval "$UNIT_CMD" && touch .gate-ok/unit
 
       # المتصفّح لا يأتي مع npm ci — وغيابُه يُسقط الحزمة كلها عند أول إقلاع.
       # يُخزَّن بمفتاح نسخة Playwright نفسها: ترقيةُ الحزمة تُبطل الخزن تلقائيًّا.
@@ -246,7 +253,9 @@ jobs:
         if: ${{ inputs.run_e2e }}
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: pw-report.json
-        run: eval "$E2E_CMD"
+        run: |
+          : "${E2E_CMD:?أمر E2E غائب}"
+          eval "$E2E_CMD"
 
       # القاعدة 5، الشقّ الثاني — Playwright يعدّ التخطّي نتيجةً متوقَّعة، فيُفحص التقرير.
       - name: E2E must have run something, and skipped nothing
