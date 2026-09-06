@@ -157,8 +157,9 @@ jobs:
           types="$IN_TYPES"; [ -n "$types" ] || types="$pm run typecheck"
           unit="$IN_UNIT";   [ -n "$unit" ]  || unit="$pm test"
           e2e="$IN_E2E";     [ -n "$e2e" ]   || e2e="$exec_cmd playwright test --reporter=list,json"
-          # صيغة الأسطر المتعددة في GITHUB_ENV — أمرٌ فيه سطرٌ جديد لا يفسد الملف
-          setvar() { { echo "$1<<__GATE_EOF__"; echo "$2"; echo "__GATE_EOF__"; } >> "$GITHUB_ENV"; }
+          # صيغة الأسطر المتعددة في GITHUB_ENV بمحدِّدٍ عشوائي لكل قيمة — أمرٌ فيه سطرٌ جديد
+          # أو سطرٌ يساوي محدِّدًا ثابتًا لا يفسد الملف
+          setvar() { local d; d="GATE_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"; { echo "$1<<$d"; echo "$2"; echo "$d"; } >> "$GITHUB_ENV"; }
           setvar PM "$pm"
           setvar BUILD_CMD "$build"
           setvar TYPES_CMD "$types"
@@ -193,6 +194,7 @@ jobs:
       - name: Build
         if: ${{ inputs.run_build }}
         run: |
+          set -o pipefail
           : "${BUILD_CMD:?أمر البناء غائب}"
           eval "$BUILD_CMD" && touch .gate-ok/build
 
@@ -205,6 +207,7 @@ jobs:
       - name: Types
         if: ${{ inputs.run_types }}
         run: |
+          set -o pipefail
           : "${TYPES_CMD:?أمر الأنواع غائب}"
           eval "$TYPES_CMD" && touch .gate-ok/types
 
@@ -217,6 +220,7 @@ jobs:
       - name: Unit
         if: ${{ inputs.run_unit }}
         run: |
+          set -o pipefail
           : "${UNIT_CMD:?أمر الوحدة غائب}"
           eval "$UNIT_CMD" && touch .gate-ok/unit
 
@@ -254,6 +258,7 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: pw-report.json
         run: |
+          set -o pipefail
           : "${E2E_CMD:?أمر E2E غائب}"
           eval "$E2E_CMD"
 
