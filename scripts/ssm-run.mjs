@@ -44,10 +44,11 @@ export function outcomeOf(inv) {
   }
 }
 
-// الاستدعاء لا يظهر فورًا بعد الإرسال (InvocationDoesNotExist) فيُعاد؛ وما سواه (صلاحية · اعتماد ·
-// شبكة) يُعلَن ويفشل فورًا لا بعد المهلة كلها
+// بعد الإرسال الأمرُ جارٍ على الجهاز، فلا يُغادَر إلا لخطأٍ لا تنفع معه الإعادة: صلاحية أو اعتماد
+// أو توقيع. وما سواه عابر (الاستدعاء لم يظهر بعد · مهلة · خنق · شبكة · خطأ داخلي) يُعاد ضمن المهلة.
+const FATAL = /AccessDenied|UnauthorizedOperation|ExpiredToken|InvalidClientTokenId|InvalidSignature|SignatureDoesNotMatch|Unable to locate credentials|InvalidInstanceId|ValidationException/i;
 export function classifyInvocationError(stderr) {
-  return /InvocationDoesNotExist/.test(String(stderr ?? "")) ? "retry" : "fatal";
+  return FATAL.test(String(stderr ?? "")) ? "fatal" : "retry";
 }
 
 function realAws(args) {
@@ -83,7 +84,8 @@ export async function runCommand({ region, instanceId, timeoutSec, scriptText, e
       inv = JSON.parse(aws(["ssm", "get-command-invocation", "--region", region, "--command-id", commandId, "--instance-id", instanceId, "--output", "json"]));
     } catch (e) {
       if (classifyInvocationError(e.stderr ?? e.message) === "retry") continue;
-      err(`::error::تعذّرت قراءة نتيجة الأمر ${commandId}: ${String(e.stderr ?? e.message).trim()}`);
+      err(`::error::تعذّرت قراءة نتيجة الأمر ${commandId} على ${instanceId}: ${String(e.stderr ?? e.message).trim()}`);
+      err(`::error::الأمر ${commandId} قد يكون جاريًا أو مكتملًا على الجهاز بلا تحقق — افحصه: aws ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId}`);
       return { exitCode: 126, commandId };
     }
     const o = outcomeOf(inv);
@@ -94,7 +96,7 @@ export async function runCommand({ region, instanceId, timeoutSec, scriptText, e
       return { exitCode: o.exitCode, commandId };
     }
   }
-  err(`::error::انتهت مهلة انتظار الأمر ${commandId} على ${instanceId}`);
+  err(`::error::انتهت مهلة انتظار الأمر ${commandId} على ${instanceId} — قد يكون جاريًا بعدُ: افحصه بـget-command-invocation قبل أي إعادة`);
   return { exitCode: 124, commandId };
 }
 

@@ -28,10 +28,38 @@ test("outcomeOf: انتهاء المهلة والإلغاء رموز مميَّ�
   assert.deepEqual(outcomeOf({ Status: "DeliveryTimedOut", ResponseCode: -1 }), { done: true, exitCode: 124 });
 });
 
-test("classifyInvocationError: الاستدعاء لم يظهر بعد يُعاد؛ AccessDenied وأشباهه يفشل فورًا", () => {
+test("classifyInvocationError: العابر يُعاد (لم يظهر بعد · مهلة · خنق · شبكة)؛ الصلاحية والاعتماد يفشلان فورًا", () => {
   assert.equal(classifyInvocationError("An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation"), "retry");
+  assert.equal(classifyInvocationError("An error occurred (RequestTimeout) when calling the GetCommandInvocation operation"), "retry");
+  assert.equal(classifyInvocationError("An error occurred (ThrottlingException) when calling ..."), "retry");
+  assert.equal(classifyInvocationError("Could not connect to the endpoint URL: \"https://ssm.eu-north-1.amazonaws.com/\""), "retry");
+  assert.equal(classifyInvocationError("An error occurred (InternalServerError) when calling ..."), "retry");
   assert.equal(classifyInvocationError("An error occurred (AccessDeniedException) when calling ..."), "fatal");
+  assert.equal(classifyInvocationError("An error occurred (ExpiredTokenException) when calling ..."), "fatal");
   assert.equal(classifyInvocationError("Unable to locate credentials"), "fatal");
+});
+
+test("runCommand: خطأ عابر بعد الإرسال لا يُغادر الأمر الجاري — يُعاد حتى الحالة النهائية", async () => {
+  const f = fakeAws([
+    { body: { Command: { CommandId: "cmd-t" } } },
+    { error: "An error occurred (RequestTimeout) when calling the GetCommandInvocation operation" },
+    { error: "Could not connect to the endpoint URL" },
+    { body: { Status: "Success", ResponseCode: 0 } },
+  ]);
+  const r = await runCommand({ region: "r", instanceId: "i-1", timeoutSec: 600, scriptText: script, env: {} }, { aws: f.aws, sleep: noSleep, log: () => {}, err: () => {}, now: (() => { let t = 0; return () => (t += 1000); })() });
+  assert.equal(r.exitCode, 0);
+  assert.equal(f.calls.length, 4);
+});
+
+test("runCommand: الخطأ الدائم والمهلة يقولان صراحةً إن الأمر قد يكون جاريًا على الجهاز ويسمّيان معرّفه", async () => {
+  const msgs = [];
+  const f = fakeAws([
+    { body: { Command: { CommandId: "cmd-x" } } },
+    { error: "An error occurred (AccessDeniedException) when calling the GetCommandInvocation operation" },
+  ]);
+  const r = await runCommand({ region: "r", instanceId: "i-1", timeoutSec: 600, scriptText: script, env: {} }, { aws: f.aws, sleep: noSleep, log: () => {}, err: (l) => msgs.push(l), now: (() => { let t = 0; return () => (t += 1000); })() });
+  assert.equal(r.exitCode, 126);
+  assert.ok(msgs.some((m) => m.includes("cmd-x") && /جار/.test(m)));
 });
 
 // منفذ aws وهمي: تسلسل ردود لكل استدعاء؛ ونومٌ لا ينتظر
