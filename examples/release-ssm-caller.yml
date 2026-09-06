@@ -1,0 +1,46 @@
+# .github/workflows/release.yml — القالب full على EC2/Compose (ناشر SSM).
+# يُشغَّل **يدويًّا من main** بمُدخَل candidate_sha. الترتيب: staging على SHA فرعك ← تجربة بشرية ←
+# git merge --ff-only ← production على الـSHA نفسه (يرفض ما ليس رأس main أو ما لم يمرّ بالتجربة).
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha: { description: "الـSHA المرشّح (40 محرفًا)", required: true }
+      environment: { type: choice, options: [staging, production], default: staging }
+      migration_strategy: { type: choice, options: [none, compatible, maintenance], default: none }
+      maintenance_confirmed: { type: boolean, default: false }
+      skip_staging: { type: boolean, default: false }
+
+jobs:
+  gate:
+    uses: mooohamd/ci-templates/.github/workflows/gate.yml@v1
+    with: { ref: "${{ inputs.candidate_sha }}", package_manager: pnpm, run_build: true, run_types: true, run_unit: true }
+    secrets: { TEST_ENV: "${{ secrets.TEST_ENV }}" }
+
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.candidate_sha }}", path: backend }   # مجلد خاص: الشجرة تبقى نظيفة للختم
+      # … بناء ما تحتاجه الحزمة (لوحة · أصول) من مستودعاتٍ أخرى برمز قراءة …
+      - run: bash backend/deploy/staging/bundle.sh --backend backend --admin admin/dist --assets design/assets --out bundle.tgz
+      - uses: actions/upload-artifact@v4
+        with: { name: bundle, path: bundle.tgz, retention-days: 7 }
+
+  release:
+    needs: [gate, bundle]
+    permissions: { id-token: write, contents: write }
+    # ثبِّت ما يمسّ الإنتاج بـSHA كامل، لا بوسمٍ متحرّك.
+    uses: mooohamd/ci-templates/.github/workflows/release-ssm.yml@REPLACE_WITH_FULL_SHA
+    with:
+      candidate_sha: ${{ inputs.candidate_sha }}
+      environment: ${{ inputs.environment }}
+      gate_passed: ${{ needs.gate.result == 'success' && needs.bundle.result == 'success' }}
+      aws_region: eu-north-1
+      role_arn: arn:aws:iam::123456789012:role/REPLACE-ci-deployer
+      expected_instance_id: ${{ inputs.environment == 'production' && 'i-REPLACE_PROD' || 'i-REPLACE_STAGING' }}
+      expected_domain: ${{ inputs.environment == 'production' && 'api.example.com' || 'staging.example.com' }}
+      bucket: REPLACE-releases
+      migration_strategy: ${{ inputs.migration_strategy }}
+      maintenance_confirmed: ${{ inputs.maintenance_confirmed }}
+      skip_staging: ${{ inputs.skip_staging }}

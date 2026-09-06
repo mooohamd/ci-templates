@@ -1,0 +1,353 @@
+# الإصدار عبر SSM — لخوادم EC2 + Compose بحزمةٍ يفعّلها متحكمٌ على الجهاز:
+#   المرشّح ← هوية الهدف ← الحزمة إلى S3 ← تفعيل على الجهاز (SSM) ← الدخان بالـSHA ← التراجع ← الوسم.
+#
+# يُستدعى من وظيفةٍ في المشروع تُشغَّل **من main** بمُدخَل candidate_sha، بعد البوابة ووظيفة بناء
+# الحزمة في التشغيل نفسه (needs). الحزمة أثرٌ (artifact) يبنيه المستدعي فلا يرى هذا الناشرُ رموز
+# المستودعات. لا أسرار هنا إطلاقًا: الهوية GitHub OIDC ← دور AWS قصير العمر (id-token: write).
+#   • لا ينشر إلا SHA اجتاز البوابة **في هذا التشغيل** (gate_passed) وبيان حزمته يحمل SHA
+#     الخادم كاملًا نظيفًا مطابقًا للمرشّح (bundle-check.mjs).
+#   • هوية الهدف: الدور المتقمَّص هو role_arn، وجهاز expected_instance_id وكيلُه Online —
+#     كلاهما مثبَّتان نصًّا في ملف المستدعي.
+#   • الإنتاج: المرشّح رأس main مرّتين، ووسم staging-<sha7> لازم (staging-gate.mjs).
+#   • التفعيل: bootstrap من شجرة المرشّح يُرسل نصًّا (ssm-run.mjs) ومخرج المتحكم يُنقل كما هو.
+#   • الدخان يطالب الألياس بأن يعيد الـSHA كاملًا وstate=clean؛ فشله يعيد الحزمة السابقة
+#     (قُرئت من ختم الجهاز قبل التفعيل) إلا في هجرة maintenance فيتوقّف بنداء.
+name: Release (SSM)
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: "الـSHA المرشّح (40 محرفًا). كل ما بعده يشير إليه."
+        type: string
+        required: true
+      environment:
+        description: "staging أو production"
+        type: string
+        required: true
+      preset:
+        type: string
+        default: "full"
+      gate_passed:
+        description: "من المستدعي: البوابة وبناء الحزمة نجحا في هذا التشغيل. النشر يرفض غير ذلك."
+        type: boolean
+        required: true
+      bundle_artifact:
+        description: "اسم الأثر الذي رفعه المستدعي ويحوي ملف الحزمة"
+        type: string
+        default: "bundle"
+      bundle_file:
+        type: string
+        default: "bundle.tgz"
+      aws_region:
+        type: string
+        required: true
+      role_arn:
+        description: "دور OIDC المتقمَّص — مثبَّت نصًّا في المستدعي"
+        type: string
+        required: true
+      expected_instance_id:
+        description: "معرّف جهاز الهدف — مثبَّت نصًّا في المستدعي"
+        type: string
+        required: true
+      expected_domain:
+        description: "الألياس الذي يراه الناس — الدخان عليه لا على رابط داخلي"
+        type: string
+        required: true
+      bucket:
+        description: "بكت الحزم (خاص؛ الجهاز يقرأ برابطٍ موقَّع قصير)"
+        type: string
+        required: true
+      bootstrap_path:
+        description: "مدخل الناشر على الجهاز في شجرة المرشّح — يعمل جذرًا ويشغّل متحكم الحزمة"
+        type: string
+        default: "deploy/ci/ssm-bootstrap.sh"
+      deployed_stamp_path:
+        description: "ختم الحزمة الحية على الجهاز (معرّفها أول كلمة) — لقراءة السابقة قبل التفعيل"
+        type: string
+        default: "/srv/nooq/api/DEPLOYED"
+      smoke_path:
+        type: string
+        default: "/v1/version"
+      execution_timeout:
+        description: "ثوانٍ لتفعيل الحزمة على الجهاز (بناء الصورة + الصحة)"
+        type: number
+        default: 1800
+      migration_strategy:
+        description: "none | compatible | maintenance"
+        type: string
+        default: "none"
+      maintenance_confirmed:
+        type: boolean
+        default: false
+      skip_staging:
+        description: "تجاوزٌ صريح لشرط المرور ببيئة الاختبار. فعلٌ مسجَّل."
+        type: boolean
+        default: false
+      require_head_of_main:
+        type: boolean
+        default: true
+      tag_on_success:
+        type: boolean
+        default: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    concurrency:
+      group: release-${{ inputs.environment }}-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      SHA: ${{ inputs.candidate_sha }}
+      STAGES: "البوابة,المرشّح,الهجرة,النشر,الدخان,الوسم"
+      SKIPPED: ${{ inputs.migration_strategy == 'none' && 'الهجرة' || '' }}
+      PIPELINE_ENV: ${{ inputs.environment }}
+      PIPELINE_PRESET: ${{ inputs.preset }}
+      PIPELINE_SHA: ${{ inputs.candidate_sha }}
+      PIPELINE_REF: ${{ github.ref_name }}
+      AWS_REGION: ${{ inputs.aws_region }}
+    steps:
+      - name: Contract — the inputs must be sane before anything moves
+        env:
+          IN_ENV: ${{ inputs.environment }}
+          IN_MIG: ${{ inputs.migration_strategy }}
+          IN_INSTANCE: ${{ inputs.expected_instance_id }}
+          IN_DOMAIN: ${{ inputs.expected_domain }}
+          IN_ROLE: ${{ inputs.role_arn }}
+        run: |
+          set -euo pipefail
+          [ "${{ inputs.gate_passed }}" = "true" ] || { echo "::error::المرشّح لم يجتز البوابة (أو لم تُبنَ حزمته) في هذا التشغيل"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::candidate_sha يجب أن يكون 40 محرفًا سداسيًّا"; exit 1; }
+          case "$IN_ENV" in staging|production) ;; *) echo "::error::environment غير معروف"; exit 1;; esac
+          case "$IN_MIG" in none|compatible|maintenance) ;; *) echo "::error::migration_strategy غير معروف"; exit 1;; esac
+          [[ "$IN_INSTANCE" =~ ^i-[0-9a-f]+$ ]] || { echo "::error::expected_instance_id ليس معرّف جهاز"; exit 1; }
+          [[ "$IN_DOMAIN" =~ ^[a-z0-9.-]+$ ]] || { echo "::error::expected_domain ليس نطاقًا"; exit 1; }
+          [[ "$IN_ROLE" =~ ^arn:aws:iam::[0-9]{12}:role/.+$ ]] || { echo "::error::role_arn ليس ARN دور"; exit 1; }
+          if [ "$IN_MIG" = "maintenance" ] && [ "${{ inputs.maintenance_confirmed }}" != "true" ]; then
+            echo "::error::هجرة maintenance لا تعمل تلقائيًّا — أعد التشغيل بـmaintenance_confirmed=true بعد نسخةٍ احتياطية"; exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+
+      - name: Purge tracked env files (rule 1)
+        run: rm -f .env .env.local .env.production .env.production.local || true
+
+      - name: Fetch the template's own scripts
+        uses: actions/checkout@v4
+        with:
+          repository: mooohamd/ci-templates
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-templates
+
+      - name: The candidate must have been on staging
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --quiet || true
+          found=false
+          git rev-parse -q --verify "refs/tags/staging-$(echo "$SHA" | cut -c1-7)" >/dev/null && found=true
+          node .ci-templates/scripts/staging-gate.mjs \
+            "${{ inputs.environment }}" "${{ inputs.preset }}" "$found" "${{ inputs.skip_staging }}" \
+            | tee /tmp/sg.out
+          grep '^PIPELINE_STAGING_PROVEN=' /tmp/sg.out >> "$GITHUB_ENV"
+
+      - name: Stage — candidate
+        run: |
+          echo "STAGE=المرشّح" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "المرشّح" running "$SKIPPED"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.bundle_artifact }}
+          path: .bundle
+
+      - name: The bundle must be this candidate, whole and clean
+        id: bundle
+        env:
+          IN_FILE: ${{ inputs.bundle_file }}
+        run: |
+          set -euo pipefail
+          node .ci-templates/scripts/bundle-check.mjs ".bundle/$IN_FILE" "$SHA" | tee /tmp/bc.out
+          grep '^BUNDLE_ID=' /tmp/bc.out >> "$GITHUB_OUTPUT"
+          echo "BUNDLE_FILE=.bundle/$IN_FILE" >> "$GITHUB_ENV"
+
+      - name: The candidate must be the head of main (first check)
+        if: ${{ inputs.environment == 'production' && inputs.require_head_of_main }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          head=$(git rev-parse origin/main)
+          [ "$head" = "$SHA" ] || { echo "::error::المرشّح $SHA ليس رأس main ($head) — ادمج بالتقديم السريع وأعد الإصدار"; exit 1; }
+
+      # الهوية قصيرة العمر من OIDC — لا مفتاح دائم في أي سرّ
+      - uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ inputs.role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: release-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: Identity — the assumed role and the target host must be the pinned ones
+        env:
+          IN_ROLE: ${{ inputs.role_arn }}
+          IN_INSTANCE: ${{ inputs.expected_instance_id }}
+        run: |
+          set -euo pipefail
+          who=$(aws sts get-caller-identity --query Arn --output text)
+          role_name="${IN_ROLE##*/}"
+          case "$who" in *":assumed-role/$role_name/"*) ;; *) echo "::error::الهوية المتقمَّصة $who ليست الدور المثبَّت $IN_ROLE"; exit 1;; esac
+          ping=$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$IN_INSTANCE" \
+            --query 'InstanceInformationList[0].PingStatus' --output text)
+          [ "$ping" = "Online" ] || { echo "::error::وكيل SSM على $IN_INSTANCE ليس Online ($ping) — لا هدف لا يُرى"; exit 1; }
+          echo "الهوية $who · الجهاز $IN_INSTANCE Online"
+
+      # السابقة تُقرأ قبل أي مساس — إليها يُرجَع إن فشل الدخان بعد تفعيلٍ «ناجح»
+      - name: Record the bundle we would fall back to
+        id: prev
+        env:
+          IN_INSTANCE: ${{ inputs.expected_instance_id }}
+          IN_STAMP: ${{ inputs.deployed_stamp_path }}
+        run: |
+          set -euo pipefail
+          printf 'cat %q 2>/dev/null | cut -d" " -f1 || true\n' "$IN_STAMP" > /tmp/read-stamp.sh
+          out=$(node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" 60 /tmp/read-stamp.sh || true)
+          prev=$(echo "$out" | grep -Eo '^[0-9a-f]{64}$' | head -1 || true)
+          echo "id=$prev" >> "$GITHUB_OUTPUT"
+          echo "الحزمة الحية السابقة: ${prev:-غير معروفة (خط أساس أو أول نشر)}"
+
+      - name: Stage — migration
+        run: |
+          echo "STAGE=الهجرة" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الهجرة" running "$SKIPPED"
+          echo "استراتيجية الهجرة المعلَنة: ${{ inputs.migration_strategy }} (الهجرات تعمل داخل إقلاع الحاوية)"
+
+      - name: Stage — deploy
+        run: |
+          echo "STAGE=النشر" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "النشر" running "$SKIPPED"
+
+      - name: Upload the bundle and sign a short-lived link
+        id: upload
+        env:
+          IN_BUCKET: ${{ inputs.bucket }}
+          IN_ENV: ${{ inputs.environment }}
+          BUNDLE_ID: ${{ steps.bundle.outputs.BUNDLE_ID }}
+        run: |
+          set -euo pipefail
+          key="$IN_ENV/$BUNDLE_ID.tgz"
+          aws s3 cp "$BUNDLE_FILE" "s3://$IN_BUCKET/$key" --no-progress
+          url=$(aws s3 presign "s3://$IN_BUCKET/$key" --expires-in 900)
+          echo "::add-mask::$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "رُفعت: s3://$IN_BUCKET/$key"
+
+      - name: The candidate must STILL be the head of main (final check)
+        if: ${{ inputs.environment == 'production' && inputs.require_head_of_main }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --quiet
+          head=$(git rev-parse origin/main)
+          [ "$head" = "$SHA" ] || { echo "::error::تحرّك رأس main أثناء التحضير — أُلغي الإصدار قبل التفعيل"; exit 1; }
+
+      - name: Activate on the host
+        id: activate
+        env:
+          IN_INSTANCE: ${{ inputs.expected_instance_id }}
+          IN_BOOT: ${{ inputs.bootstrap_path }}
+          IN_TIMEOUT: ${{ inputs.execution_timeout }}
+          BUNDLE_ID: ${{ steps.bundle.outputs.BUNDLE_ID }}
+          BUNDLE_URL: ${{ steps.upload.outputs.url }}
+        run: |
+          set -euo pipefail
+          [ -f "$IN_BOOT" ] || { echo "::error::مدخل الناشر $IN_BOOT غير موجود في شجرة المرشّح"; exit 1; }
+          set +e
+          node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" "$IN_TIMEOUT" "$IN_BOOT" \
+            "NOOQ_BUNDLE_ID=$BUNDLE_ID" "NOOQ_BUNDLE_URL=$BUNDLE_URL"
+          rc=$?
+          set -e
+          case $rc in
+            0) echo "فُعّلت الحزمة $BUNDLE_ID" ;;
+            6) echo "::error::التفعيل فشل واستُعيدت السابقة على الجهاز بصحة مثبتة (خروج 6)"; exit 6 ;;
+            7) echo "::error::التفعيل فشل وتعذّرت الاستعادة — الجهاز يحتاج يدًا بشرية (خروج 7)"; exit 7 ;;
+            8) echo "::error::تفعيل آخر جارٍ على الجهاز (خروج 8)"; exit 8 ;;
+            10) echo "::error::أسرار الجهاز تحمل BUILD_SHA/BUILD_STATE — احذفهما ثم أعد الإصدار (خروج 10)"; exit 10 ;;
+            124) echo "::error::انتهت مهلة التفعيل ($IN_TIMEOUT ث) — افحص الجهاز؛ القفل والحزمة قد يحتاجان تنظيفًا"; exit 124 ;;
+            *) echo "::error::التفعيل انتهى بخروج $rc (3 لا حزمة · 4 معرّف · 5 بصمة · 9 حزمة ناقصة)"; exit "$rc" ;;
+          esac
+
+      - name: Stage — smoke
+        run: |
+          echo "STAGE=الدخان" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الدخان" running "$SKIPPED"
+
+      - name: Smoke — the alias must serve the candidate, clean
+        id: smoke
+        env:
+          IN_DOMAIN: ${{ inputs.expected_domain }}
+          IN_PATH: ${{ inputs.smoke_path }}
+        run: |
+          set -euo pipefail
+          node .ci-templates/scripts/smoke.mjs "https://$IN_DOMAIN" "$IN_PATH" "$SHA" 20
+          state=$(curl -fsS -H 'cache-control: no-cache' "https://$IN_DOMAIN$IN_PATH?_=$(date +%s)" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).state??"")}catch{console.log("")}})')
+          [ "$state" = "clean" ] || { echo "::error::الحيّ يعلن حزمةً ${state:-بلا حالة} لا clean"; exit 1; }
+
+      - name: Rollback (compatible / none) — reactivate the previous bundle
+        if: ${{ failure() && steps.smoke.outcome == 'failure' && inputs.migration_strategy != 'maintenance' }}
+        env:
+          IN_INSTANCE: ${{ inputs.expected_instance_id }}
+          IN_BOOT: ${{ inputs.bootstrap_path }}
+          IN_TIMEOUT: ${{ inputs.execution_timeout }}
+          PREV: ${{ steps.prev.outputs.id }}
+        run: |
+          set -euo pipefail
+          if [[ "$PREV" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::warning::فشل الدخان — إرجاع الحزمة السابقة $PREV"
+            node .ci-templates/scripts/ssm-run.mjs "$AWS_REGION" "$IN_INSTANCE" "$IN_TIMEOUT" "$IN_BOOT" "NOOQ_BUNDLE_ID=$PREV"
+            echo "أُرجعت $PREV. النشرة الفاشلة: ${{ steps.bundle.outputs.BUNDLE_ID }}"
+          else
+            echo "::warning::لا حزمة سابقة معروفة على الجهاز — إن فشلت الصحة فقد عوّض المتحكم ذاتيًّا؛ افحص الختم يدويًّا"
+          fi
+
+      - name: Halt (maintenance) — a schema change is not auto-reversible
+        if: ${{ failure() && steps.smoke.outcome == 'failure' && inputs.migration_strategy == 'maintenance' }}
+        run: |
+          echo "::error::فشل الدخان بعد هجرة maintenance — **لا تراجع تلقائي**."
+          echo "::error::الإجراء: (1) أبقِ وضع الصيانة، (2) استرجع النسخة الاحتياطية، (3) أرجِع الحزمة السابقة يدويًّا (deploy.sh --rollback)"
+          exit 1
+
+      - name: Stage — tag
+        if: ${{ success() }}
+        run: |
+          echo "STAGE=الوسم" >> "$GITHUB_ENV"
+          node .ci-templates/scripts/stage.mjs "$STAGES" "الوسم" running "$SKIPPED"
+
+      - name: Mark this candidate as staged
+        if: ${{ success() && inputs.environment == 'staging' }}
+        run: |
+          set -euo pipefail
+          tag="staging-$(echo "$SHA" | cut -c1-7)"
+          git tag -f "$tag" "$SHA" && git push -f origin "$tag"
+          echo "الوسم: $tag"
+
+      - name: Tag the release
+        if: ${{ success() && inputs.environment == 'production' && inputs.tag_on_success }}
+        run: |
+          set -euo pipefail
+          tag="release-$(date -u +%Y%m%d-%H%M)-$(echo "$SHA" | cut -c1-7)"
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a "$tag" -m "deployed bundle ${{ steps.bundle.outputs.BUNDLE_ID }} (previous: ${{ steps.prev.outputs.id }})" "$SHA"
+          git push origin "$tag"
+          echo "الوسم: $tag"
+
+      - name: Stage — done
+        if: ${{ success() }}
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "الوسم" done "$SKIPPED"
+
+      - name: Stage — failed
+        if: ${{ failure() }}
+        run: node .ci-templates/scripts/stage.mjs "$STAGES" "${STAGE:-المرشّح}" failed "$SKIPPED" || true

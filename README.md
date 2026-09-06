@@ -56,6 +56,19 @@
 2. لا ملاحظات ⇒ `git merge --ff-only` إلى `main`.
 3. `Release` بـ`environment=production` على **الـSHA نفسه**.
 
+## ناشر EC2/Compose عبر SSM — `release-ssm.yml`
+
+لمشروعٍ لا ينشر على Vercel بل على جهاز EC2 بحزمةٍ يفعّلها متحكمٌ على الجهاز (nooq): الناشر
+نفسه بلا سرّ — GitHub OIDC ← دور AWS قصير العمر ← الحزمة إلى S3 برابطٍ موقَّع 15 دقيقة ←
+`ssm send-command` يشغّل مدخل الناشر من شجرة المرشّح (`bootstrap_path`) ← الدخان على الألياس
+بالـSHA كاملًا و`state=clean` ← التراجع بإعادة تفعيل الحزمة السابقة (قُرئت من ختم الجهاز قبل
+التفعيل) ← الوسم. المستدعي يبني الحزمة في وظيفته ويرفعها أثرًا (`bundle_artifact`) —
+`bundle-check.mjs` يثبت أن بيانها يحمل SHA المرشّح كاملًا ونظيفًا. القواعد الخمس كما في
+`release.yml`: البوابة في التشغيل نفسه · رأس main مرّتين · وسم staging لازم · هوية الهدف
+(`role_arn` · `expected_instance_id` · `expected_domain`) مثبَّتة نصًّا. `examples/release-ssm-caller.yml`.
+التزويد بيد المالك (مزوّد OIDC · دور الناشر بأقل صلاحية · البكت · DHMC لـSSM) — سكربت المشروع
+`deploy/ci/provision-ci.sh`.
+
 ## اختبار السكربتات
 
 ```bash
