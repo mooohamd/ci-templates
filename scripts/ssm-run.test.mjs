@@ -2,11 +2,26 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildCommands, outcomeOf, classifyInvocationError, runCommand } from "./ssm-run.mjs";
 
-test("buildCommands: المتغيرات تُصدَّر مقتبسةً بأمان ثم أسطر السكربت كما هي", () => {
-  const cmds = buildCommands("set -e\necho hi\n", { NOOQ_BUNDLE_ID: "abc", NOOQ_BUNDLE_URL: "https://x/y?a=1&b='q'" });
+test("buildCommands: المتغيرات تُصدَّر مقتبسةً بأمان، ثم السكربت يُكتب ملفًّا ويُشغَّل بـbash لا بـsh", () => {
+  // AWS-RunShellScript يشغّل الأوامر بـsh (dash على أوبونتو) فيرفض `set -o pipefail` و`[[ ]]` —
+  // الصيد الحي 42515401: «set: Illegal option -o pipefail» خروج 2 قبل أي تنزيل
+  const cmds = buildCommands("set -euo pipefail\necho hi\n", { NOOQ_BUNDLE_ID: "abc", NOOQ_BUNDLE_URL: "https://x/y?a=1&b='q'" });
   assert.equal(cmds[0], "export NOOQ_BUNDLE_ID='abc'");
   assert.equal(cmds[1], "export NOOQ_BUNDLE_URL='https://x/y?a=1&b='\\''q'\\'''");
-  assert.deepEqual(cmds.slice(2), ["set -e", "echo hi"]);
+  const open = cmds.findIndex((l) => /^cat > "\$__nooq_script" <<'__NOOQ_SSM__'$/.test(l));
+  assert.ok(open > 1, "heredoc opener");
+  assert.match(cmds[open - 1], /^__nooq_script=\$\(mktemp /);
+  assert.deepEqual(cmds.slice(open + 1, open + 3), ["set -euo pipefail", "echo hi"]);
+  assert.equal(cmds[open + 3], "__NOOQ_SSM__");
+  assert.match(cmds[open + 4], /^bash "\$__nooq_script"; __rc=\$\?; rm -f "\$__nooq_script"; exit \$__rc$/);
+  assert.equal(cmds.length, open + 5);
+});
+
+test("buildCommands: لا سطر من السكربت يُنفَّذ خارج ملف bash — ولا يُبدَّل $ داخله", () => {
+  const cmds = buildCommands('[[ -n "$X" ]] && echo "$X"\n', {});
+  const open = cmds.findIndex((l) => l.startsWith("cat > "));
+  assert.equal(cmds[open + 1], '[[ -n "$X" ]] && echo "$X"');
+  assert.ok(!cmds.slice(0, open).some((l) => l.includes("[[")), "no bash-ism runs under sh");
 });
 
 test("buildCommands: اسم متغير غير صالح يُرفض — لا حقن في سطر export", () => {

@@ -11,15 +11,22 @@ import { setTimeout as nodeSleep } from "node:timers/promises";
 
 const quote = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
+// AWS-RunShellScript يشغّل الأوامر بـsh (dash على أوبونتو) فيرفض bash-isms (`set -o pipefail` ·
+// `[[ ]]` · `${@: -1}`) — الصيد الحي 42515401. السكربت يُكتب ملفًّا بمحدِّد مقتبس (لا استبدال داخله)
+// ويُشغَّل بـbash، ورمز خروجه يُنقل كما هو بعد حذف الملف. الصادرات قبله صالحة في sh وbash معًا.
 export function buildCommands(scriptText, env = {}) {
   const lines = [];
   for (const [k, v] of Object.entries(env)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`اسم متغير غير صالح: ${k}`);
     lines.push(`export ${k}=${quote(v)}`);
   }
-  for (const l of String(scriptText).split("\n")) {
-    if (l.length) lines.push(l);
-  }
+  const body = String(scriptText).split("\n").filter((l) => l.length);
+  if (body.some((l) => l.trim() === "__NOOQ_SSM__")) throw new Error("السكربت يحوي محدِّد الملف __NOOQ_SSM__");
+  lines.push('__nooq_script=$(mktemp /tmp/nooq-ssm.XXXXXX)');
+  lines.push(`cat > "$__nooq_script" <<'__NOOQ_SSM__'`);
+  lines.push(...body);
+  lines.push("__NOOQ_SSM__");
+  lines.push('bash "$__nooq_script"; __rc=$?; rm -f "$__nooq_script"; exit $__rc');
   return lines;
 }
 
