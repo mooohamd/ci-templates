@@ -70,7 +70,9 @@ on:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    # مسمّاةٌ لا latest: GitHub ينقل latest إلى Ubuntu 26 في 2026-10-19، وتبدّل صورة العامل قد يُسقط الفحص أو النشر بلا تغييرٍ في الكود.
+    # الترقية قرارٌ يُجرَّب بتشغيلٍ حيّ، لا تحديثٌ يُفرض يوم نشرة.
+    runs-on: ubuntu-24.04
     env:
       STAGES: "البناء,الأنواع,الوحدة,E2E"
       PIPELINE_PRESET: ${{ inputs.preset }}
