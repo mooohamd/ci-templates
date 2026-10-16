@@ -153,6 +153,7 @@ test("runCommand: مجموعة CloudWatch اختيارية — حين تُعطى
   assert.ok(i > 0, "send-command يحمل إعداد CloudWatch");
   assert.equal(send[i + 1], "CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/nooq/release-ssm");
   assert.ok(errs.some((l) => l.includes("/nooq/release-ssm") && l.includes("cmd-cw") && l.includes("i-9")), "السجل يسمّي موضع الخرج الكامل");
+  assert.ok(errs.some((l) => l.includes("stdout") && l.includes("stderr")), "والمساران معًا — الخطأ في stderr مستقل");
 
   const without = fakeAws([{ body: { Command: { CommandId: "cmd-plain" } } }, done]);
   await runCommand(

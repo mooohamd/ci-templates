@@ -91,7 +91,8 @@ export async function runCommand({ region, instanceId, timeoutSec, scriptText, e
   const commandId = sent.Command.CommandId;
   log(`SSM command ${commandId} → ${instanceId}`);
   // إلى stderr: مستدعٍ يلتقط stdout ليقرأ منه (ختم الحزمة) لا يتلوّث
-  if (logGroup) err(`الخرج كاملًا في CloudWatch: ${logGroup} ← ${commandId}/${instanceId}/aws-runShellScript/stdout`);
+  // AWS يكتب مسارين مستقلين: stdout وstderr (أمرٌ لا يكتب إلا في stderr لا يظهر في الأول)
+  if (logGroup) err(`الخرج كاملًا في CloudWatch: ${logGroup} ← ${commandId}/${instanceId}/aws-runShellScript/stdout و…/stderr`);
   const deadline = now() + (Number(timeoutSec) + 180) * 1000;
   while (now() < deadline) {
     await sleep(5000);
