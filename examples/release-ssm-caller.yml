@@ -13,7 +13,8 @@ on:
 
 jobs:
   gate:
-    uses: mooohamd/ci-templates/.github/workflows/gate.yml@v1
+    # مسار الإصدار مثبَّتٌ بـSHA لا @v1 (قرار 2026-10-16): البوابة تقرأ الأسرار ويقرّر نجاحها النشر — ci.yml وحده على @v1
+    uses: mooohamd/ci-templates/.github/workflows/gate.yml@<SHA-كامل> # v1
     with: { ref: "${{ inputs.candidate_sha }}", package_manager: pnpm, run_build: true, run_types: true, run_unit: true }
     secrets: { TEST_ENV: "${{ secrets.TEST_ENV }}" }
 
