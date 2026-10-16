@@ -20,11 +20,11 @@ jobs:
   bundle:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { ref: "${{ inputs.candidate_sha }}", path: backend }   # مجلد خاص: الشجرة تبقى نظيفة للختم
       # … بناء ما تحتاجه الحزمة (لوحة · أصول) من مستودعاتٍ أخرى برمز قراءة …
       - run: bash backend/deploy/staging/bundle.sh --backend backend --admin admin/dist --assets design/assets --out bundle.tgz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: bundle, path: bundle.tgz, retention-days: 7 }
 
   release:

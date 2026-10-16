@@ -90,6 +90,10 @@ on:
       tag_on_success:
         type: boolean
         default: true
+      cloudwatch_log_group:
+        description: "مجموعة سجلات CloudWatch يُرسل إليها خرج أوامر الجهاز كاملًا (الخرج المضمَّن مبتورٌ ~24 ألف حرف ويزول). اختيارية — صلاحية الكتابة في دور الجهاز لا هنا؛ فارغةٌ = كما كان"
+        type: string
+        default: ""
 
 jobs:
   release:
@@ -111,6 +115,7 @@ jobs:
       PIPELINE_SHA: ${{ inputs.candidate_sha }}
       PIPELINE_REF: ${{ github.ref_name }}
       AWS_REGION: ${{ inputs.aws_region }}
+      SSM_CLOUDWATCH_LOG_GROUP: ${{ inputs.cloudwatch_log_group }}
     steps:
       - name: Contract — the inputs must be sane before anything moves
         env:
@@ -132,7 +137,7 @@ jobs:
             echo "::error::هجرة maintenance لا تعمل تلقائيًّا — أعد التشغيل بـmaintenance_confirmed=true بعد نسخةٍ احتياطية"; exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.candidate_sha }}
           fetch-depth: 0
@@ -141,7 +146,7 @@ jobs:
         run: rm -f .env .env.local .env.production .env.production.local || true
 
       - name: Fetch the template's own scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: mooohamd/ci-templates
           ref: ${{ github.job_workflow_sha }}
@@ -167,7 +172,7 @@ jobs:
           echo "STAGE=المرشّح" >> "$GITHUB_ENV"
           node .ci-templates/scripts/stage.mjs "$STAGES" "المرشّح" running "$SKIPPED"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.bundle_artifact }}
           path: .bundle

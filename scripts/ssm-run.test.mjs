@@ -135,3 +135,38 @@ test("runCommand: تجاوز المهلة الكلية بلا حالة نهائ�
   assert.equal(r.exitCode, 124);
   void f;
 });
+
+// تحصين الأنبوب (نوق البند 6): خرج الأمر المضمَّن مبتورٌ (~24 ألف حرف) ويزول — فمجموعة سجلات CloudWatch اختيارية تحفظه كاملًا،
+// والغياب يُبقي الإرسال كما كان حرفيًّا فلا يتغيّر مستدعٍ لم يطلبها
+test("runCommand: مجموعة CloudWatch اختيارية — حين تُعطى يُرسل الخرج إليها وتُسمّى في السجل؛ وبلاها لا علم", async () => {
+  const done = { body: { Status: "Success", ResponseCode: 0 } };
+  const clock = () => { let t = 0; return () => (t += 1000); };
+  const withGroup = fakeAws([{ body: { Command: { CommandId: "cmd-cw" } } }, done]);
+  const errs = [];
+  const r = await runCommand(
+    { region: "eu-north-1", instanceId: "i-9", timeoutSec: 60, scriptText: script, env: {}, logGroup: "/nooq/release-ssm" },
+    { aws: withGroup.aws, sleep: noSleep, log: () => {}, err: (l) => errs.push(l), now: clock() },
+  );
+  assert.equal(r.exitCode, 0);
+  const send = withGroup.calls[0];
+  const i = send.indexOf("--cloud-watch-output-config");
+  assert.ok(i > 0, "send-command يحمل إعداد CloudWatch");
+  assert.equal(send[i + 1], "CloudWatchOutputEnabled=true,CloudWatchLogGroupName=/nooq/release-ssm");
+  assert.ok(errs.some((l) => l.includes("/nooq/release-ssm") && l.includes("cmd-cw") && l.includes("i-9")), "السجل يسمّي موضع الخرج الكامل");
+
+  const without = fakeAws([{ body: { Command: { CommandId: "cmd-plain" } } }, done]);
+  await runCommand(
+    { region: "eu-north-1", instanceId: "i-9", timeoutSec: 60, scriptText: script, env: {} },
+    { aws: without.aws, sleep: noSleep, log: () => {}, err: () => {}, now: clock() },
+  );
+  assert.ok(!without.calls[0].includes("--cloud-watch-output-config"), "بلا مجموعة لا علم");
+});
+
+test("runCommand: اسم مجموعة CloudWatch غير صالح يُرفض قبل الإرسال — لا حقن في وسيط الإعداد", async () => {
+  const f = fakeAws([]);
+  await assert.rejects(runCommand(
+    { region: "r", instanceId: "i-1", timeoutSec: 60, scriptText: script, env: {}, logGroup: "/nooq/x,CloudWatchOutputEnabled=false" },
+    { aws: f.aws, sleep: noSleep, log: () => {}, err: () => {}, now: () => 0 },
+  ));
+  assert.equal(f.calls.length, 0);
+});

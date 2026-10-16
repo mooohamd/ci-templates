@@ -68,6 +68,10 @@
 (`role_arn` · `expected_instance_id` · `expected_domain`) مثبَّتة نصًّا. `examples/release-ssm-caller.yml`.
 التزويد بيد المالك (مزوّد OIDC · دور الناشر بأقل صلاحية · البكت · DHMC لـSSM) — سكربت المشروع
 `deploy/ci/provision-ci.sh`.
+**خرج الأوامر كاملًا في CloudWatch (اختياري — `cloudwatch_log_group`):** الخرج المضمَّن في SSM مبتورٌ (~24 ألف حرف) ويزول،
+فهذا المُدخل يرسل خرج كل أمرٍ على الجهاز إلى مجموعة السجلات، والسجل يسمّي موضعه (`{المجموعة} ← {الأمر}/{الجهاز}/aws-runShellScript/stdout`).
+صلاحية الكتابة (`logs:CreateLogStream` · `logs:PutLogEvents` · `logs:DescribeLogStreams` على المجموعة) في **دور الجهاز** بيد المالك،
+والمجموعة تُنشأ مسبقًا بمدة احتفاظ؛ فارغًا يبقى الإرسال كما كان.
 
 ## اختبار السكربتات
 

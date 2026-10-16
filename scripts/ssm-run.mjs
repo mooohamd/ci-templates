@@ -2,6 +2,8 @@
 // الناشر عبر SSM: يرسل سكربتًا إلى جهازٍ مثبَّت (AWS-RunShellScript) وينتظر نتيجته وينقل رمز
 // خروجه **كما هو** — فمخارج متحكم التفعيل (3–10) تصل تشغيلة الإصدار بلا تسطيح.
 //   node ssm-run.mjs <region> <instanceId> <executionTimeoutSec> <scriptPath> [KEY=VALUE ...]
+// SSM_CLOUDWATCH_LOG_GROUP (بيئة المشغّل — اختيارية) يرسل الخرج كاملًا إلى مجموعة سجلات CloudWatch: الخرج المضمَّن مبتورٌ ويزول،
+// وصلاحية الكتابة على الجهاز في دوره (لا هنا) — والغياب يُبقي الإرسال كما كان حرفيًّا.
 // المتغيرات تُصدَّر مقتبسةً بأمان قبل أسطر السكربت. مخارج هذا المنفذ نفسه: 124 مهلة · 125 إلغاء ·
 // 126 تعذّر قراءة النتيجة (صلاحية/اعتماد) — فلا يُخلط بمخارج المتحكم. الخرج المضمَّن مبتور (~24 ألف
 // حرف) فيُطبع ما وصل.
@@ -68,21 +70,28 @@ function realAws(args) {
   }
 }
 
-export async function runCommand({ region, instanceId, timeoutSec, scriptText, env }, deps = {}) {
+const LOG_GROUP = /^[A-Za-z0-9_\-./#]{1,512}$/;
+
+export async function runCommand({ region, instanceId, timeoutSec, scriptText, env, logGroup }, deps = {}) {
   const aws = deps.aws ?? realAws;
   const sleep = deps.sleep ?? ((ms) => nodeSleep(ms));
   const log = deps.log ?? console.log;
   const err = deps.err ?? console.error;
   const now = deps.now ?? Date.now;
+  if (logGroup && !LOG_GROUP.test(logGroup)) throw new Error(`اسم مجموعة CloudWatch غير صالح: ${logGroup}`);
   const commands = buildCommands(scriptText, env);
   const params = JSON.stringify({ commands, executionTimeout: [String(Number(timeoutSec))] });
   const sent = JSON.parse(aws([
     "ssm", "send-command", "--region", region, "--instance-ids", instanceId,
     "--document-name", "AWS-RunShellScript", "--comment", `release ${env?.NOOQ_BUNDLE_ID ?? ""}`.slice(0, 100),
-    "--timeout-seconds", "120", "--parameters", params, "--output", "json",
+    "--timeout-seconds", "120", "--parameters", params,
+    ...(logGroup ? ["--cloud-watch-output-config", `CloudWatchOutputEnabled=true,CloudWatchLogGroupName=${logGroup}`] : []),
+    "--output", "json",
   ]));
   const commandId = sent.Command.CommandId;
   log(`SSM command ${commandId} → ${instanceId}`);
+  // إلى stderr: مستدعٍ يلتقط stdout ليقرأ منه (ختم الحزمة) لا يتلوّث
+  if (logGroup) err(`الخرج كاملًا في CloudWatch: ${logGroup} ← ${commandId}/${instanceId}/aws-runShellScript/stdout`);
   const deadline = now() + (Number(timeoutSec) + 180) * 1000;
   while (now() < deadline) {
     await sleep(5000);
@@ -119,6 +128,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (i <= 0) { console.error(`وسيط غير صالح: ${pair}`); process.exit(2); }
     env[pair.slice(0, i)] = pair.slice(i + 1);
   }
-  const r = await runCommand({ region, instanceId, timeoutSec: Number(timeoutArg), scriptText: readFileSync(scriptPath, "utf8"), env });
+  const r = await runCommand({
+    region, instanceId, timeoutSec: Number(timeoutArg), scriptText: readFileSync(scriptPath, "utf8"), env,
+    logGroup: process.env.SSM_CLOUDWATCH_LOG_GROUP || undefined,
+  });
   process.exit(r.exitCode);
 }
