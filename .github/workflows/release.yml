@@ -126,8 +126,9 @@ jobs:
       - name: Fetch the template's own scripts
         uses: actions/checkout@v7
         with:
-          repository: mooohamd/ci-templates
-          ref: ${{ github.job_workflow_sha }}
+          # سياق job لا github: خاصية job_workflow_sha في سياق github غير موجودة فتصير فارغة ← الفرع الافتراضي (ثبت حيًّا في نوق 38934994311)
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .ci-templates
 
       # دليلُ مرور الاختبار لا افتراضُه: نشرةُ اختبارٍ ناجحة تضع وسم
